@@ -4,8 +4,7 @@
   agent.py     — разговор с Claude: вопрос → инструменты → ответ;
   telegram.py  — Telegram long polling, белый список чатов.
 
-Включается, когда заданы ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN и HUB_BOT_CODE (группа
-подключается командой /start <код>) или HUB_BOT_CHATS.
+Включается, когда заданы ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN и HUB_BOT_CHATS.
 """
 from __future__ import annotations
 

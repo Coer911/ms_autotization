@@ -323,140 +323,52 @@ class FakeTelegram:
     def __init__(self, updates):
         self.updates = updates
         self.sent = []
-        self.commands = None
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         method = request.url.path.rsplit("/", 1)[-1]
         assert "/botTOKEN/" in request.url.path
         body = json.loads(request.content or b"{}")
-        if method == "getMe":
-            return httpx.Response(200, json={"ok": True, "result": {"id": 999, "username": "ms_hub_bot"}})
-        if method == "setMyCommands":
-            self.commands = body["commands"]
         if method == "getUpdates":
             ups, self.updates = self.updates, []
             return httpx.Response(200, json={"ok": True, "result": ups})
         if method == "sendMessage":
-            self.sent.append((str(body["chat_id"]), body["text"],
-                              (body.get("reply_parameters") or {}).get("message_id")))
+            self.sent.append((str(body["chat_id"]), body["text"]))
         return httpx.Response(200, json={"ok": True, "result": True})
 
 
 class StubAgent:
-    def __init__(self, answer="ответ"):
+    def __init__(self):
         self.asked, self.resets = [], []
-        self.answer = answer
 
     async def ask(self, chat, text):
         self.asked.append((chat, text))
-        return self.answer
+        return "ответ " + "x" * 5000
 
     def reset(self, chat):
         self.resets.append(chat)
 
 
-class MemoryStore:
-    def __init__(self):
-        self.data = {}
-
-    async def get(self, key, default=None):
-        return self.data.get(key, default)
-
-    async def set(self, key, value):
-        self.data[key] = value
+def update(n, chat, text):
+    return {"update_id": n, "message": {"chat": {"id": chat}, "text": text}}
 
 
-def update(n, chat, text, *, group=False, user=1, reply_to_bot=False, migrate=None):
-    msg = {"message_id": n * 10, "chat": {"id": chat, "type": "supergroup" if group else "private",
-                                          "title": "Склад"},
-           "from": {"id": user}, "text": text}
-    if reply_to_bot:
-        msg["reply_to_message"] = {"from": {"id": 999}}
-    if migrate:
-        msg = {"chat": msg["chat"], "migrate_to_chat_id": migrate}
-    return {"update_id": n, "message": msg}
-
-
-async def make_bot(updates, allowed=(), code="", agent=None, storage=None):
-    tg = FakeTelegram(updates)
-    bot = TelegramBot("TOKEN", agent or StubAgent(), set(allowed), code=code, storage=storage,
-                      http=httpx.AsyncClient(transport=httpx.MockTransport(tg.handle)))
-    await bot.start()
-    return tg, bot
-
-
-async def drain(bot):
-    n = await bot.poll_once()
+async def test_telegram_whitelist_commands_and_long_answers():
+    tg = FakeTelegram([update(1, 100, "остатки сиропов"), update(2, 666, "покажи долги"),
+                       update(3, 100, "/new"), update(4, 100, "/start")])
+    agent = StubAgent()
+    bot = TelegramBot("TOKEN", agent, {"100"}, http=httpx.AsyncClient(transport=httpx.MockTransport(tg.handle)))
+    assert await bot.poll_once() == 4
     await asyncio.gather(*bot._tasks)
-    return n
-
-
-async def test_telegram_private_whitelist_and_long_answers():
-    agent = StubAgent("ответ " + "x" * 5000)
-    tg, bot = await make_bot([update(1, 100, "остатки сиропов"), update(2, 666, "покажи долги"),
-                              update(3, 100, "/new"), update(4, 100, "/start")],
-                             allowed={"100"}, agent=agent)
-    assert await drain(bot) == 4
     assert agent.asked == [("100", "остатки сиропов")]          # чужой чат до модели не доходит
     assert agent.resets == ["100"]
-    to_owner = [t for c, t, _ in tg.sent if c == "100"]
-    assert sum(len(t) for t in to_owner) > 5000
-    assert all(len(t) <= 4000 for _, t, _ in tg.sent)            # длинный ответ — частями
-    assert [t for c, t, _ in tg.sent if c == "666"] == [
-        "Нет доступа. Chat id: 666 — его добавляют в HUB_BOT_CHATS."]
+    to_owner = [t for c, t in tg.sent if c == "100"]
+    assert sum(len(t) for t in to_owner if t.startswith("ответ") or set(t) == {"x"}) > 5000
+    assert all(len(t) <= 4000 for _, t in tg.sent)               # длинный ответ — частями
+    stranger = [t for c, t in tg.sent if c == "666"]
+    assert stranger == ["Нет доступа. Ваш chat id: 666 — его добавляют в HUB_BOT_CHATS."]
     assert any("Примеры вопросов" in t for t in to_owner)
-    assert [c["command"] for c in tg.commands] == ["ask", "new", "help"]
     assert bot._offset == 5
     await bot.close()
-
-
-async def test_group_connects_by_code_and_answers_only_when_addressed():
-    store = MemoryStore()
-    agent = StubAgent()
-    g = -100500
-    tg, bot = await make_bot([
-        update(1, g, "/ask остатки", group=True),                 # группа ещё не подключена
-        update(2, g, "/start неверный", group=True),
-        update(3, g, "привет всем", group=True),                  # переписка — молчим
-        update(4, g, "/start s3cret-code@x", group=True),         # не тот код
-        update(5, g, "/start s3cret-code", group=True),           # подключили
-        update(6, 77, "/start s3cret-code"),                      # в личке код не действует
-    ], code="s3cret-code", agent=agent, storage=store)
-    await drain(bot)
-    assert agent.asked == []
-    texts = [(c, t) for c, t, _ in tg.sent]
-    assert texts[0] == (str(g), "Группа не подключена. Администратор: отправьте здесь /start <код доступа>.")
-    assert any(t.startswith("Группа подключена.") for _, t in texts)
-    assert texts[-1] == ("77", "Нет доступа. Chat id: 77 — его добавляют в HUB_BOT_CHATS.")
-    assert json.loads(store.data["bot:chats"]) == [str(g)]
-
-    tg.updates = [
-        update(7, g, "/ask остатки сиропов", group=True, user=1),
-        update(8, g, "/ask@ms_hub_bot выручка за октябрь", group=True, user=2),
-        update(9, g, "@ms_hub_bot, долги с 1 октября", group=True, user=2),
-        update(10, g, "а по ИП А.И.?", group=True, user=2, reply_to_bot=True),
-        update(11, g, "просто болтаем", group=True, user=3),
-        update(12, g, "/ask@other_bot что-то", group=True, user=3),
-        update(13, g, "/new", group=True, user=2),
-    ]
-    tg.sent.clear()
-    await drain(bot)
-    # у каждого участника своя история: ключ «группа:пользователь»
-    assert sorted(agent.asked) == sorted([(f"{g}:1", "остатки сиропов"), (f"{g}:2", "выручка за октябрь"),
-                                          (f"{g}:2", "долги с 1 октября"), (f"{g}:2", "а по ИП А.И.?")])
-    assert agent.resets == [f"{g}:2"]
-    assert {m for _, _, m in tg.sent} == {70, 80, 90, 100, 130}   # ответ — реплаем на вопрос
-    await bot.close()
-
-    # после перезапуска группа подключена из базы; стала супергруппой — id переехал
-    tg2, bot2 = await make_bot([update(14, g, "", group=True, migrate=-100777),
-                                update(15, -100777, "/ask остатки", group=True)],
-                               code="s3cret-code", agent=agent, storage=store)
-    assert str(g) in bot2.allowed
-    await drain(bot2)
-    assert json.loads(store.data["bot:chats"]) == ["-100777"]
-    assert agent.asked[-1] == ("-100777:1", "остатки")
-    await bot2.close()
 
 
 def test_chunks_split_on_lines():
@@ -498,9 +410,6 @@ def test_bot_settings_from_env(tmp_path):
     env = {"HUB_CONFIG": str(cfg), "TELEGRAM_BOT_TOKEN": "t", "HUB_BOT_CHATS": " 1, -100200 ,"}
     s = Settings.from_env(env)
     assert s.bot_chats == ("1", "-100200") and not s.bot_ready      # нет ключа Anthropic
-    only_code = Settings.from_env({"HUB_CONFIG": str(cfg), "TELEGRAM_BOT_TOKEN": "t",
-                                   "ANTHROPIC_API_KEY": "x", "HUB_BOT_CODE": " код "})
-    assert only_code.bot_ready and only_code.bot_code == "код"     # хватает кода группы
     s = Settings.from_env({**env, "ANTHROPIC_API_KEY": "x", "HUB_BOT_EFFORT": "low"})
     assert s.bot_ready and s.bot_effort == "low" and s.bot_model == "claude-opus-5-5"
     assert s.bot == {"internal_counterparties": ["ОЗОН"]}
