@@ -5,6 +5,8 @@
   worker     — разбор очереди и повторы; реплик сколько угодно (нужен PostgreSQL);
   scheduler  — опрос МойСклад и плановые автоматизации; активен ровно один —
                лишние реплики ждут advisory lock в PostgreSQL.
+  bot        — только Telegram-бот (он же работает внутри all, когда настроен);
+               одна реплика: getUpdates одним токеном может слушать один процесс.
 
 Масштабирование = тот же образ, другая HUB_ROLE. Код автоматизаций не меняется.
 """
@@ -45,6 +47,8 @@ class Hub:
         self.types = event_types(self.automations)
         self._wake = asyncio.Event()
         self._tasks: list[asyncio.Task] = []
+        self._agent = None
+        self._bot = None
 
     @classmethod
     async def create(cls, settings: Settings, **kw) -> Hub:
@@ -52,6 +56,14 @@ class Hub:
 
     def wake(self) -> None:
         self._wake.set()
+
+    @property
+    def agent(self):
+        """Собеседник для бота и POST /api/ask; создаётся при первом вопросе."""
+        if self._agent is None:
+            from .bot import make_agent
+            self._agent = make_agent(self.settings, self.ms)
+        return self._agent
 
     # ── единицы работы (их же зовут CLI и тесты) ────────────────────────────
 
@@ -96,7 +108,7 @@ class Hub:
 
     async def start(self, role: str | None = None) -> None:
         role = role or self.settings.role
-        if self.storage.is_sqlite and role != "all":
+        if self.storage.is_sqlite and role not in ("all", "bot"):
             raise RuntimeError(f"роль {role} отдельным процессом — только с PostgreSQL"
                                " (HUB_DATABASE_URL); на SQLite запускайте роль all")
         if self.settings.dry_run:
@@ -108,12 +120,22 @@ class Hub:
                 self._loop("воркер", self.tick, WORKER_IDLE, wake=True), name="worker"))
         if role in ("all", "scheduler"):
             self._tasks.append(asyncio.create_task(self._scheduler(), name="scheduler"))
+        if role in ("all", "bot"):
+            if self.settings.bot_ready:
+                from .bot.telegram import TelegramBot
+                self._bot = TelegramBot(self.settings.telegram_token, self.agent,
+                                        set(self.settings.bot_chats))
+                self._tasks.append(asyncio.create_task(self._bot.run(), name="bot"))
+            elif role == "bot":
+                raise RuntimeError("роль bot: нужны ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN и HUB_BOT_CHATS")
 
     async def stop(self) -> None:
         for t in self._tasks:
             t.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
         self._tasks = []
+        if self._bot:
+            await self._bot.close()
         await self.ms.close()
         await self.channels.close()
         await self.storage.close()

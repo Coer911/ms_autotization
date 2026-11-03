@@ -14,6 +14,7 @@
   GET   /api/{kind}/{ref}/link?template=…          — публичная ссылка mskld.ru
   POST  /api/{kind}/{ref}/run/{automation}?force=1 — запустить автоматизацию
   GET   /api/automations | /api/journal | /api/stats
+  POST  /api/ask   {"question": "…", "chat": "…"}  — вопрос боту по МойСклад (только чтение)
 
 ref — id, номер документа (как в МойСклад), для контрагента — ещё ИНН или точное имя.
 """
@@ -138,6 +139,17 @@ def create_app(settings: Settings | None = None, *, background: bool = True,
     @app.get("/api/stats", dependencies=[Depends(auth)])
     async def stats(h: Hub = Depends(get_hub)):
         return await h.storage.stats()
+
+    @app.post("/api/ask", dependencies=[Depends(auth)])
+    async def ask(question: str = Body(..., embed=True, min_length=1, max_length=4000),
+                  chat: str = Body("api", embed=True, max_length=100), h: Hub = Depends(get_hub)):
+        from ..bot import BotError
+        if not settings.anthropic_ready:
+            raise HTTPException(503, "бот не настроен: нет ANTHROPIC_API_KEY")
+        try:
+            return {"answer": await h.agent.ask(f"api:{chat}", question)}
+        except BotError as e:
+            raise HTTPException(503, str(e)) from None
 
     # ── сущности ─────────────────────────────────────────────────────────────
 

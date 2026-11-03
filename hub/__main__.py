@@ -10,6 +10,8 @@
   set-state <тип> <ref> <статус>            — сменить статус руками
   set-field <тип> <ref> <поле> <значение>   — записать доп. поле руками
   journal [-n 20] [--status failed]
+  tool <инструмент> '<json>'                — функция бота без LLM: stock, sales, reorder, unpaid…
+  ask "<вопрос>"                            — спросить бота из терминала (нужен ANTHROPIC_API_KEY)
 """
 from __future__ import annotations
 
@@ -263,6 +265,35 @@ async def cmd_journal(s: Settings, n: int, status: str) -> int:
     return 0
 
 
+async def cmd_tool(s: Settings, name: str, raw: str) -> int:
+    import json
+
+    from .bot import make_tools
+    from .bot.tools import ToolError, call
+    async with client(s) as ms:
+        try:
+            out = await call(make_tools(s, ms), name, json.loads(raw or "{}"))
+        except (ToolError, json.JSONDecodeError) as e:
+            bad(str(e))
+            return 1
+    print(json.dumps(json.loads(out), ensure_ascii=False, indent=1))
+    return 0
+
+
+async def cmd_ask(s: Settings, question: str) -> int:
+    from .bot import BotError, make_agent
+    if not s.anthropic_ready:
+        bad("не задан ANTHROPIC_API_KEY")
+        return 1
+    async with client(s) as ms:
+        try:
+            print(await make_agent(s, ms).ask("cli", question))
+        except BotError as e:
+            bad(str(e))
+            return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="python -m hub", description="Хаб автоматизаций МойСклад")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -287,9 +318,16 @@ def main(argv: list[str] | None = None) -> int:
     j = sub.add_parser("journal")
     j.add_argument("-n", type=int, default=20)
     j.add_argument("--status", default="")
+    t = sub.add_parser("tool")
+    t.add_argument("name", help="stock | sales | sales_by_month | reorder | supplier_prices | "
+                                "tech_card | unpaid | product")
+    t.add_argument("args", nargs="?", default="{}", help='JSON, например \'{"search": "сироп"}\'')
+    sub.add_parser("ask").add_argument("question")
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # httpx пишет в INFO полный адрес запроса, а в адресах Telegram — токен бота
+    logging.getLogger("httpx").setLevel(logging.WARNING)
     s = Settings.from_env()
     if args.cmd == "serve":
         import uvicorn
@@ -314,6 +352,8 @@ def main(argv: list[str] | None = None) -> int:
         "poll": lambda: cmd_poll(s),
         "run": lambda: cmd_run(s, args.automation, args.ref, args.force),
         "set-state": lambda: cmd_set(s, args.kind, args.ref, "state", [args.state]),
+        "tool": lambda: cmd_tool(s, args.name, args.args),
+        "ask": lambda: cmd_ask(s, args.question),
         "set-field": lambda: cmd_set(s, args.kind, args.ref, "field", [args.field, args.value]),
     }
     try:

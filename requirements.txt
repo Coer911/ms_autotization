@@ -5,3 +5,4 @@ PyYAML==6.0.3
 SQLAlchemy[asyncio]==2.1.6
 aiosqlite==0.22.1
 asyncpg==0.32.0
+anthropic==2.4.0

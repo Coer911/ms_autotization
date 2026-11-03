@@ -27,7 +27,7 @@ from urllib.parse import urlparse
 import httpx
 
 BASE = "https://api.moysklad.ru/api/remap/1.2"
-USER_AGENT = "moysklad-hub/1.0 (+https://github.com/Coer911/moysklad-hub)"
+USER_AGENT = "moysklad-hub/1.0 (+https://github.com/Coer911/ms_autotization)"
 WINDOW_SECONDS = 3.0
 PARALLEL = 4
 META_TTL = 300.0

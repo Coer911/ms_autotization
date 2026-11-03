@@ -13,7 +13,7 @@ from pathlib import Path
 import yaml
 
 APP_DIR = Path(__file__).resolve().parent.parent
-ROLES = ("all", "api", "worker", "scheduler")
+ROLES = ("all", "api", "worker", "scheduler", "bot")
 
 
 def _flag(value: str | None, default: bool) -> bool:
@@ -28,7 +28,7 @@ class Settings:
     ms_base: str = "https://api.moysklad.ru/api/remap/1.2"
     ms_rps: int | None = None         # запросов за 3 с; None — по графику МойСклад для токена пользователя
     database_url: str = f"sqlite+aiosqlite:///{APP_DIR / 'data' / 'hub.sqlite3'}"
-    role: str = "all"                 # all | api | worker | scheduler
+    role: str = "all"                 # all | api | worker | scheduler | bot
     config_path: str = str(APP_DIR / "config.yaml")
     api_key: str = ""                 # X-Api-Key для REST API хаба; пусто — API закрыт
     webhook_secret: str = ""          # часть пути вебхука /hooks/moysklad/<secret>
@@ -47,7 +47,12 @@ class Settings:
     smtp_starttls: bool = False
     telegram_token: str = ""
     alert_chat: str = ""              # Telegram chat_id для ошибок автоматизаций
+    bot_chats: tuple[str, ...] = ()   # кому бот отвечает (chat id через запятую)
+    bot_model: str = "claude-opus-5-5"
+    bot_effort: str = "medium"        # low | medium | high — глубина размышлений и цена ответа
+    anthropic_ready: bool = False     # задан ли ANTHROPIC_API_KEY (сам ключ читает SDK)
     automations: dict = field(default_factory=dict)
+    bot: dict = field(default_factory=dict)       # секция bot: в config.yaml
 
     @classmethod
     def from_env(cls, env: dict | None = None) -> Settings:
@@ -76,11 +81,22 @@ class Settings:
             smtp_starttls=_flag(env.get("SMTP_STARTTLS"), False),
             telegram_token=env.get("TELEGRAM_BOT_TOKEN", ""),
             alert_chat=env.get("HUB_ALERT_CHAT", ""),
+            bot_chats=tuple(c.strip() for c in env.get("HUB_BOT_CHATS", "").split(",") if c.strip()),
+            bot_model=env.get("HUB_BOT_MODEL", "") or cls.bot_model,
+            bot_effort=env.get("HUB_BOT_EFFORT", "") or cls.bot_effort,
+            anthropic_ready=bool(env.get("ANTHROPIC_API_KEY")),
         )
         if s.role not in ROLES:
             raise ValueError(f"HUB_ROLE={s.role}: можно {', '.join(ROLES)}")
-        s.automations = load_config(s.config_path).get("automations", {})
+        config = load_config(s.config_path)
+        s.automations = config.get("automations", {})
+        s.bot = config.get("bot") or {}
         return s
+
+    @property
+    def bot_ready(self) -> bool:
+        """Telegram-бот запускается, только когда настроено всё нужное."""
+        return bool(self.anthropic_ready and self.telegram_token and self.bot_chats)
 
     @property
     def webhook_url(self) -> str:
