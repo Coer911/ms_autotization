@@ -48,6 +48,7 @@ class Settings:
     telegram_token: str = ""
     alert_chat: str = ""              # Telegram chat_id для ошибок автоматизаций
     bot_chats: tuple[str, ...] = ()   # кому бот отвечает (chat id через запятую)
+    bot_code: str = ""                # код подключения группы: /start <код> в группе
     bot_model: str = "claude-opus-5-5"
     bot_effort: str = "medium"        # low | medium | high — глубина размышлений и цена ответа
     anthropic_ready: bool = False     # задан ли ANTHROPIC_API_KEY (сам ключ читает SDK)
@@ -82,6 +83,7 @@ class Settings:
             telegram_token=env.get("TELEGRAM_BOT_TOKEN", ""),
             alert_chat=env.get("HUB_ALERT_CHAT", ""),
             bot_chats=tuple(c.strip() for c in env.get("HUB_BOT_CHATS", "").split(",") if c.strip()),
+            bot_code=env.get("HUB_BOT_CODE", "").strip(),
             bot_model=env.get("HUB_BOT_MODEL", "") or cls.bot_model,
             bot_effort=env.get("HUB_BOT_EFFORT", "") or cls.bot_effort,
             anthropic_ready=bool(env.get("ANTHROPIC_API_KEY")),
@@ -96,7 +98,7 @@ class Settings:
     @property
     def bot_ready(self) -> bool:
         """Telegram-бот запускается, только когда настроено всё нужное."""
-        return bool(self.anthropic_ready and self.telegram_token and self.bot_chats)
+        return bool(self.anthropic_ready and self.telegram_token and (self.bot_chats or self.bot_code))
 
     @property
     def webhook_url(self) -> str:

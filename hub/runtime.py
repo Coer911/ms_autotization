@@ -124,10 +124,12 @@ class Hub:
             if self.settings.bot_ready:
                 from .bot.telegram import TelegramBot
                 self._bot = TelegramBot(self.settings.telegram_token, self.agent,
-                                        set(self.settings.bot_chats))
+                                        set(self.settings.bot_chats), code=self.settings.bot_code,
+                                        storage=self.storage)
                 self._tasks.append(asyncio.create_task(self._bot.run(), name="bot"))
             elif role == "bot":
-                raise RuntimeError("роль bot: нужны ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN и HUB_BOT_CHATS")
+                raise RuntimeError("роль bot: нужны ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN"
+                                   " и HUB_BOT_CODE или HUB_BOT_CHATS")
 
     async def stop(self) -> None:
         for t in self._tasks:
