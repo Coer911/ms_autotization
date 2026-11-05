@@ -66,26 +66,30 @@ ROWS_MM = (
 )
 
 
-def _style(size: float, *, bold: bool = False, horiz: str = "left", vert: str = "center",
-           wrap: bool = True, shrink: bool = False, top: str = "", num: str = "") -> xlwt.XFStyle:
+def style(size: float, *, bold: bool = False, horiz: str = "left", vert: str = "center",
+           wrap: bool = True, shrink: bool = False, top: str = "", box: str = "",
+           num: str = "") -> xlwt.XFStyle:
+    """Стиль ячейки: шрифт Arial, выравнивание; top — линия сверху, box — рамка со всех сторон."""
     spec = (f"font: name Arial, height {round(size * 20)}{', bold on' if bold else ''}; "
             f"align: horiz {horiz}, vert {vert}{', wrap on' if wrap else ''}"
             f"{', shrink_to_fit on' if shrink else ''}")
-    if top:
+    if box:
+        spec += f"; borders: left {box}, right {box}, top {top or box}, bottom {box}"
+    elif top:
         spec += f"; borders: top {top}"
     return xlwt.easyxf(spec, num_format_str=num or "General")
 
 
-def _mm_to_colwidth(mm: float) -> int:
+def mm_to_colwidth(mm: float) -> int:
     # Ширина колонки — в 1/256 ширины цифры шрифта по умолчанию (Arial 10 ≈ 7 px при 96 dpi).
     return round(mm / 25.4 * 96 / 7 * 256)
 
 
-def _mm_to_twips(mm: float) -> int:
+def mm_to_twips(mm: float) -> int:
     return round(mm / 25.4 * 72 * 20)
 
 
-def _pls_record(width_mm: float, height_mm: float) -> bytes:
+def pls_record(width_mm: float, height_mm: float) -> bytes:
     """PLS (0x004D) с DEVMODEW: размер бумаги пользователя, как его пишет Excel с драйвером термопринтера.
 
     BIFF8 не умеет хранить произвольный размер в PAGESETUP, только номер из списка.
@@ -103,10 +107,10 @@ def _pls_record(width_mm: float, height_mm: float) -> bytes:
 HEADER, FOOTER, SETUP = 0x0014, 0x0015, 0x00A1
 
 
-def _with_pls(sheet: Worksheet.Worksheet, pls: bytes) -> None:
+def fix_page_block(sheet: Worksheet.Worksheet, pls: bytes = b"") -> None:
     """Правит блок настроек страницы листа по [MS-XLS].
 
-    PLS встаёт перед SETUP. Пустые HEADER/FOOTER пишутся без тела: «нет колонтитула»,
+    PLS (если дан) встаёт перед SETUP. Пустые HEADER/FOOTER пишутся без тела: «нет колонтитула»,
     а не строка нулевой длины, как их пишет xlwt.
     """
     original = sheet._Worksheet__print_settings_rec
@@ -119,7 +123,7 @@ def _with_pls(sheet: Worksheet.Worksheet, pls: bytes) -> None:
             pos += 4 + cb
             if rt in (HEADER, FOOTER):
                 record = struct.pack("<HH", rt, 0)
-            elif rt == SETUP:
+            elif rt == SETUP and pls:
                 out.append(pls)
             out.append(record)
         return b"".join(out)
@@ -134,43 +138,43 @@ def build(values: dict[str, str] | None = None) -> xlwt.Workbook:
     ws = wb.add_sheet("Стикер")
 
     for i, mm in enumerate(COLS_MM):
-        ws.col(i).width = _mm_to_colwidth(mm)
+        ws.col(i).width = mm_to_colwidth(mm)
     for i, mm in enumerate(ROWS_MM):
         row = ws.row(i)
         row.height_mismatch = True
-        row.height = _mm_to_twips(mm)
+        row.height = mm_to_twips(mm)
 
-    label = _style(7.5, vert="top")
+    label = style(7.5, vert="top")
     sep = "medium"
 
-    ws.write_merge(0, 0, 0, 1, v["number"], _style(15, bold=True, wrap=False, shrink=True))
-    ws.write_merge(0, 0, 2, 3, v["date"], _style(10, horiz="right", wrap=False))
+    ws.write_merge(0, 0, 0, 1, v["number"], style(15, bold=True, wrap=False, shrink=True))
+    ws.write_merge(0, 0, 2, 3, v["date"], style(10, horiz="right", wrap=False))
 
-    ws.write(1, 0, "Получатель:", _style(7.5, top=sep))
-    ws.write_merge(1, 1, 1, 3, v["recipient"], _style(12, bold=True, wrap=False, shrink=True, top=sep))
+    ws.write(1, 0, "Получатель:", style(7.5, top=sep))
+    ws.write_merge(1, 1, 1, 3, v["recipient"], style(12, bold=True, wrap=False, shrink=True, top=sep))
 
-    ws.write(2, 0, "Телефон:", _style(7.5))
-    ws.write_merge(2, 2, 1, 3, v["phone"], _style(14, bold=True, wrap=False, shrink=True))
+    ws.write(2, 0, "Телефон:", style(7.5))
+    ws.write_merge(2, 2, 1, 3, v["phone"], style(14, bold=True, wrap=False, shrink=True))
 
     ws.write(3, 0, "Адрес:", label)
-    ws.write_merge(3, 3, 1, 3, v["address"], _style(10.5, vert="top"))
+    ws.write_merge(3, 3, 1, 3, v["address"], style(10.5, vert="top"))
 
     ws.write(4, 0, "К адресу:", label)
-    ws.write_merge(4, 4, 1, 3, v["address_note"], _style(8.5, bold=True, vert="top"))
+    ws.write_merge(4, 4, 1, 3, v["address_note"], style(8.5, bold=True, vert="top"))
 
-    ws.write(5, 0, "Комментарий:", _style(7.5, vert="top", top="thin"))
-    ws.write_merge(5, 5, 1, 3, v["comment"], _style(8, vert="top", top="thin"))
+    ws.write(5, 0, "Комментарий:", style(7.5, vert="top", top="thin"))
+    ws.write_merge(5, 5, 1, 3, v["comment"], style(8, vert="top", top="thin"))
 
-    ws.write(6, 0, "Сумма:", _style(7.5, top=sep))
-    sum_style = _style(11, bold=True, wrap=False, top=sep, num='#,##0.00" руб."')
+    ws.write(6, 0, "Сумма:", style(7.5, top=sep))
+    sum_style = style(11, bold=True, wrap=False, top=sep, num='#,##0.00" руб."')
     try:
         ws.write(6, 1, float(v["sum"]), sum_style)
     except ValueError:
         ws.write(6, 1, v["sum"], sum_style)
-    ws.write(6, 2, "Мест:", _style(7.5, top=sep))
-    ws.write(6, 3, "________", _style(10, top=sep))
+    ws.write(6, 2, "Мест:", style(7.5, top=sep))
+    ws.write(6, 3, "________", style(10, top=sep))
 
-    ws.write_merge(7, 7, 0, 3, v["sender"], _style(6.5, wrap=False, shrink=True, top="thin"))
+    ws.write_merge(7, 7, 0, 3, v["sender"], style(6.5, wrap=False, shrink=True, top="thin"))
 
     # Страница: без колонтитулов, поля по краям, всё на один лист.
     ws.header_str = b""  # xlwt на Python 3 принимает здесь только bytes
@@ -183,7 +187,7 @@ def build(values: dict[str, str] | None = None) -> xlwt.Workbook:
     ws.fit_num_pages = 1
     ws.fit_width_to_pages = ws.fit_height_to_pages = 1
     ws.show_grid = False
-    _with_pls(ws, _pls_record(WIDTH_MM, HEIGHT_MM))
+    fix_page_block(ws, pls_record(WIDTH_MM, HEIGHT_MM))
     return wb
 
 
