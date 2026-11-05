@@ -4,12 +4,17 @@
     python print_templates/courier_label.py          # → print_templates/courier_label_120x75.xls
 
 Готовый .xls загружается в МойСклад руками (через API шаблоны не загружаются — см.
-docs/moysklad-api/workbook/_workbook_print_templates.md): Продажи → Заказы покупателей →
-открыть заказ → Печать → Настроить… → Загрузить шаблон. Подробно — print_templates/README.md.
+docs/moysklad-api/workbook/_workbook_print_templates.md): заказ покупателя → Печать →
+Настроить… → добавить шаблон. Подробно — print_templates/README.md.
 
 Разметка — как в стандартных шаблонах МойСклад (download-template/order.xls,
 invoice-stamp-sign.xls): ${…} — выражения jXLS. В заказе покупателя
 o.sourceAgentRequisite — покупатель, o.targetAgentRequisite — ваша организация.
+
+Набор полей сверен с 800 заказами (17.08–04.11.2026): адрес доставки есть в 61 %, ещё 28 % —
+только в карточке покупателя; комментарий к адресу (вход, часы, контакт) — 29 %; комментарий
+заказа — 28 % (у заказов с сайта там способ доставки, адрес ПВЗ и получатель); телефон
+в карточке — 85 %. Доп. поля «Тип доставки» и «Оплата» заполнены меньше чем в 1 % — их нет.
 """
 
 from __future__ import annotations
@@ -24,55 +29,48 @@ from xlwt import Worksheet
 WIDTH_MM, HEIGHT_MM = 120, 75
 MARGIN_X_MM, MARGIN_Y_MM = 3, 2
 
-# Доп. поля заказа покупателя — имена ровно как в МойСклад (Настройки → Заказы покупателей).
-ATTR_DELIVERY = "Тип доставки"  # справочник
-ATTR_PAYMENT = "Оплата"  # справочник
-ATTR_PHONE = "Номер телефона"  # строка
-
-
-def attr(name: str, suffix: str) -> str:
-    return f'formatter.findAttribute(o, "{name}").{suffix}'
-
-
-PHONE_ATTR = attr(ATTR_PHONE, "valueString")
+# Доп. поле заказа (строка): телефон получателя, если он не тот, что в карточке покупателя.
+ATTR_PHONE = "Номер телефона"
+PHONE_ATTR = f'formatter.findAttribute(o, "{ATTR_PHONE}").valueString'
 
 # Что подставляет МойСклад. Ключи — места на стикере.
 FIELDS = {
     "number": "ЗАКАЗ № ${o.name}",
     "date": 'от ${formatter.format("%1$td.%1$tm.%1$tY", formatter.getExcelDate(o.moment))}',
-    "delivery": "${" + attr(ATTR_DELIVERY, "entityValue.name") + "}",
     "recipient": "${o.sourceAgentRequisite.agent.name}",
     # Телефон из доп. поля заказа, если оно заполнено, иначе — из карточки покупателя.
     "phone": "${formatter.printIfElse(empty(" + PHONE_ATTR + "), "
     "o.sourceAgentRequisite.agent.contact.phones, " + PHONE_ATTR + ")}",
-    "address": "${o.addressFull}",
+    # Адрес доставки заказа, если пусто — фактический адрес из карточки покупателя.
+    "address": "${formatter.printIfElse(empty(o.addressFull), "
+    "o.sourceAgentRequisite.actualAddress, o.addressFull)}",
+    "address_note": "${o.address.comment}",
     "comment": "${o.description}",
     "sum": "${o.sum.sumInCurrency / 100.0}",
-    "payment": "${" + attr(ATTR_PAYMENT, "entityValue.name") + "}",
-    "positions": "${o.positions.size()}",
     "sender": "Отправитель: ${o.targetAgentRequisite.agent.name}, "
     "тел. ${o.targetAgentRequisite.agent.contact.phones}",
 }
 
-# Сетка: 4 колонки и 9 строк, в сумме 114 × 71 мм — стикер минус поля.
+# Сетка: 4 колонки и 8 строк, в сумме 114 × 71 мм — стикер минус поля.
+# Строк на поле — по тем же 800 заказам: столько, чтобы текст влез целиком почти всегда.
 COLS_MM = (21, 47, 19, 27)
 ROWS_MM = (
     9.0,  # 0 номер и дата
-    5.5,  # 1 тип доставки
-    10.5,  # 2 получатель (2 строки)
-    7.0,  # 3 телефон
-    14.0,  # 4 адрес (3 строки)
-    9.5,  # 5 комментарий (3 строки мелко)
-    6.5,  # 6 сумма и оплата
-    5.0,  # 7 мест и позиций
-    4.0,  # 8 отправитель
+    6.5,  # 1 получатель: 1 строка — 99 % имён; длиннее — шрифт ужмётся
+    7.0,  # 2 телефон
+    9.5,  # 3 адрес: 2 строки — 99 %
+    12.0,  # 4 комментарий к адресу: 3 строки — 91 %
+    17.5,  # 5 комментарий заказа: 5 строк — 94 %
+    5.5,  # 6 сумма и места
+    4.0,  # 7 отправитель
 )
 
 
 def _style(size: float, *, bold: bool = False, horiz: str = "left", vert: str = "center",
-           wrap: bool = True, top: str = "", num: str = "") -> xlwt.XFStyle:
+           wrap: bool = True, shrink: bool = False, top: str = "", num: str = "") -> xlwt.XFStyle:
     spec = (f"font: name Arial, height {round(size * 20)}{', bold on' if bold else ''}; "
-            f"align: horiz {horiz}, vert {vert}{', wrap on' if wrap else ''}")
+            f"align: horiz {horiz}, vert {vert}{', wrap on' if wrap else ''}"
+            f"{', shrink_to_fit on' if shrink else ''}")
     if top:
         spec += f"; borders: top {top}"
     return xlwt.easyxf(spec, num_format_str=num or "General")
@@ -143,42 +141,36 @@ def build(values: dict[str, str] | None = None) -> xlwt.Workbook:
         row.height = _mm_to_twips(mm)
 
     label = _style(7.5, vert="top")
-    label_mid = _style(7.5)
     sep = "medium"
 
-    ws.write_merge(0, 0, 0, 1, v["number"], _style(15, bold=True, wrap=False))
+    ws.write_merge(0, 0, 0, 1, v["number"], _style(15, bold=True, wrap=False, shrink=True))
     ws.write_merge(0, 0, 2, 3, v["date"], _style(10, horiz="right", wrap=False))
 
-    ws.write(1, 0, "Доставка:", label_mid)
-    ws.write_merge(1, 1, 1, 3, v["delivery"], _style(9.5, bold=True))
+    ws.write(1, 0, "Получатель:", _style(7.5, top=sep))
+    ws.write_merge(1, 1, 1, 3, v["recipient"], _style(12, bold=True, wrap=False, shrink=True, top=sep))
 
-    ws.write(2, 0, "Получатель:", _style(7.5, vert="top", top=sep))
-    ws.write_merge(2, 2, 1, 3, v["recipient"], _style(12, bold=True, vert="top", top=sep))
+    ws.write(2, 0, "Телефон:", _style(7.5))
+    ws.write_merge(2, 2, 1, 3, v["phone"], _style(14, bold=True, wrap=False, shrink=True))
 
-    ws.write(3, 0, "Телефон:", label_mid)
-    ws.write_merge(3, 3, 1, 3, v["phone"], _style(14, bold=True))
+    ws.write(3, 0, "Адрес:", label)
+    ws.write_merge(3, 3, 1, 3, v["address"], _style(10.5, vert="top"))
 
-    ws.write(4, 0, "Адрес:", label)
-    ws.write_merge(4, 4, 1, 3, v["address"], _style(10.5, vert="top"))
+    ws.write(4, 0, "К адресу:", label)
+    ws.write_merge(4, 4, 1, 3, v["address_note"], _style(8.5, bold=True, vert="top"))
 
-    ws.write(5, 0, "Комментарий:", label)
-    ws.write_merge(5, 5, 1, 3, v["comment"], _style(8, vert="top"))
+    ws.write(5, 0, "Комментарий:", _style(7.5, vert="top", top="thin"))
+    ws.write_merge(5, 5, 1, 3, v["comment"], _style(8, vert="top", top="thin"))
 
     ws.write(6, 0, "Сумма:", _style(7.5, top=sep))
-    sum_style = _style(12, bold=True, wrap=False, top=sep, num='#,##0.00" руб."')
+    sum_style = _style(11, bold=True, wrap=False, top=sep, num='#,##0.00" руб."')
     try:
         ws.write(6, 1, float(v["sum"]), sum_style)
     except ValueError:
         ws.write(6, 1, v["sum"], sum_style)
-    ws.write(6, 2, "Оплата:", _style(7.5, top=sep))
-    ws.write(6, 3, v["payment"], _style(8.5, bold=True, top=sep))
+    ws.write(6, 2, "Мест:", _style(7.5, top=sep))
+    ws.write(6, 3, "________", _style(10, top=sep))
 
-    ws.write(7, 0, "Мест:", label_mid)
-    ws.write(7, 1, "________", _style(10))
-    ws.write(7, 2, "Позиций:", label_mid)
-    ws.write(7, 3, v["positions"], _style(10, wrap=False))
-
-    ws.write_merge(8, 8, 0, 3, v["sender"], _style(6.5, wrap=False, top="thin"))
+    ws.write_merge(7, 7, 0, 3, v["sender"], _style(6.5, wrap=False, shrink=True, top="thin"))
 
     # Страница: без колонтитулов, поля по краям, всё на один лист.
     ws.header_str = b""  # xlwt на Python 3 принимает здесь только bytes
