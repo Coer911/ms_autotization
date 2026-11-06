@@ -9,6 +9,7 @@
   run <автоматизация> <номер|id|ИНН> [--force]
   set-state <тип> <ref> <статус>            — сменить статус руками
   set-field <тип> <ref> <поле> <значение>   — записать доп. поле руками
+  contracts number [--apply] [--since Д]   — номера договоров: «ПК» → «ПК-ДД/ММ/ГГ-NN»
   journal [-n 20] [--status failed]
   tool <инструмент> '<json>'                — функция бота без LLM: stock, sales, reorder, unpaid…
   ask "<вопрос>"                            — спросить бота из терминала (нужен ANTHROPIC_API_KEY)
@@ -252,6 +253,30 @@ async def cmd_set(s: Settings, kind: str, ref: str, what: str, args: list[str]) 
     return 0
 
 
+async def cmd_contracts(s: Settings, apply: bool, since: str = "") -> int:
+    from datetime import timedelta
+
+    from . import contracts
+    since = since or (datetime.now(MSK) - timedelta(days=30)).strftime("%Y-%m-%d")
+    async with client(s) as ms:
+        rows = await contracts.load(ms)
+        for c in contracts.stale(rows, since):
+            warn(f"«{c['name']}» от {c['moment'][:10]} · {(c.get('agent') or {}).get('name', '')}: "
+                 f"старше {since}, не трогаю — номер вручную или --since")
+        todo = contracts.plan(rows, since)
+        if not todo:
+            ok("договоров с номером из одной серии (" + ", ".join(contracts.SERIES) + ") нет")
+            return 0
+        for r in todo:
+            print(f"  «{r.old}» от {r.moment} · {r.agent} → {r.new}")
+        if not apply:
+            warn(f"пробный прогон: ничего не записано. Записать {len(todo)} — с --apply")
+            return 0
+        await contracts.apply(ms, todo)
+        ok(f"записано номеров: {len(todo)}")
+    return 0
+
+
 async def cmd_journal(s: Settings, n: int, status: str) -> int:
     from .storage import Storage
     storage = await Storage.open(s.database_url)
@@ -315,6 +340,10 @@ def main(argv: list[str] | None = None) -> int:
     sf = sub.add_parser("set-field")
     for a in ("kind", "ref", "field", "value"):
         sf.add_argument(a)
+    c = sub.add_parser("contracts", help="номера договоров")
+    c.add_argument("action", choices=["number"])
+    c.add_argument("--apply", action="store_true", help="записать в МойСклад (без него — только план)")
+    c.add_argument("--since", default="", help="ГГГГ-ММ-ДД: нумеровать договоры не старше (по умолчанию 30 дней)")
     j = sub.add_parser("journal")
     j.add_argument("-n", type=int, default=20)
     j.add_argument("--status", default="")
@@ -355,6 +384,7 @@ def main(argv: list[str] | None = None) -> int:
         "tool": lambda: cmd_tool(s, args.name, args.args),
         "ask": lambda: cmd_ask(s, args.question),
         "set-field": lambda: cmd_set(s, args.kind, args.ref, "field", [args.field, args.value]),
+        "contracts": lambda: cmd_contracts(s, args.apply, args.since),
     }
     try:
         return asyncio.run(commands[args.cmd]())

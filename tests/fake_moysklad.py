@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 
 BASE = "https://api.moysklad.ru/api/remap/1.2"
-TYPES = ("customerorder", "demand", "counterparty")
+TYPES = ("customerorder", "demand", "counterparty", "contract")
 STATES = {
     "customerorder": ["Новый", "Подтверждён", "Собран", "Отгружен", "Отменён"],
     "demand": ["Новый", "Отгружен", "Доставлен", "ОТПРАВЛЕН", "ОТПРАВЛЕН В ЭДО"],
@@ -100,6 +100,15 @@ class FakeMoySklad:
              "attributes": [], "shipmentAddress": "СПб, Невский 1"}
         self.db[type_][id_] = d
         return d
+
+    def add_contract(self, name: str, moment: str = "2026-11-06 00:00:00.000",
+                     agent: dict | None = None) -> dict:
+        agent = agent or self.add_counterparty()
+        id_ = str(uuid.uuid4())
+        c = {**meta("contract", id_), "id": id_, "name": name, "moment": moment, "updated": self.tick(),
+             "contractType": "Sales", "agent": agent, "attributes": []}
+        self.db["contract"][id_] = c
+        return c
 
     def add_order(self, number: str, state: str = "Новый", agent: dict | None = None,
                   sum_kop: int = 1234560, organization: str = "ИП Культура") -> dict:
@@ -257,6 +266,8 @@ class FakeMoySklad:
                 return httpx.Response(200, json=pub)
             return httpx.Response(200, json={"rows": pubs})
         if method == "PUT":
+            if "name" in body:
+                obj["name"] = body["name"]
             if "state" in body:
                 href = body["state"]["meta"]["href"]
                 st = next((s for s in self.states[t] if s["meta"]["href"] == href), None)
