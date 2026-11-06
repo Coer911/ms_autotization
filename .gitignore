@@ -3,3 +3,5 @@ data/
 __pycache__/
 .pytest_cache/
 .ruff_cache/
+print_templates/jxls_check/lib/
+print_templates/jxls_check/out/

@@ -1,0 +1,7 @@
+<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>local</groupId><artifactId>jxls-check</artifactId><version>1</version>
+  <dependencies>
+    <dependency><groupId>net.sf.jxls</groupId><artifactId>jxls-core</artifactId><version>1.0.6</version></dependency>
+  </dependencies>
+</project>
