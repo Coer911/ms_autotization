@@ -1,10 +1,13 @@
-"""Лист A4 на коробку: всё, что на стикере курьера, плюс состав заказа. Шаблон для «Отгрузок».
+"""Лист A4 на коробку: всё, что на стикере курьера, плюс состав заказа и логотип. Шаблон для «Отгрузок».
 
-    pip install xlwt
+    pip install openpyxl pillow        # и LibreOffice (soffice) для перевода в .xls
     python print_templates/shipment_a4.py            # → print_templates/shipment_a4.xls
 
 Загружается в МойСклад руками: отгрузка → Печать → Настроить… → добавить шаблон.
 Подробно — print_templates/README.md.
+
+Собирается в openpyxl с логотипом и переводится в .xls через LibreOffice — как договор
+(contract_supply.py), который уже напечатан в МойСклад с логотипом без ошибок.
 
 В отгрузке стороны наоборот, чем в заказе: o.sourceAgentRequisite — ваша организация,
 o.targetAgentRequisite — покупатель (стандартный УПД МойСклад: «Продавец» — source,
@@ -15,7 +18,7 @@ o.targetAgentRequisite — покупатель (стандартный УПД �
 заказа (02998 и 1139 (2)6), поэтому крупно — номер заказа. Комментарий в отгрузку почти
 не копируется (1 % против 25 % у заказов) — берётся из заказа. Адрес доставки есть в 87 %
 отгрузок, ещё 4 % — из карточки покупателя. Позиций: медиана 3, 99 % — до 15, на первый
-лист помещается около 20.
+лист помещается около 18.
 """
 
 from __future__ import annotations
@@ -23,10 +26,15 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import xlwt
-from courier_label import fix_page_block, mm_to_colwidth, mm_to_twips, style
+from contract_supply import LOGO, to_xls
+from openpyxl import Workbook
+from openpyxl.drawing.image import Image as XlImage
+from openpyxl.styles import Alignment, Border, Font, Side
 
+OUT = Path(__file__).with_name("shipment_a4.xls")
+FONT = "Arial"
 MARGIN_MM = 10
+LOGO_MM = 45  # ширина логотипа
 
 BUYER = "o.targetAgentRequisite"
 SELLER = "o.sourceAgentRequisite"
@@ -52,127 +60,130 @@ FIELDS = {
 # низ — таблица: № | Наименование (B:C) | Кол-во | Ед. | ✓
 COLS_MM = (10, 24, 96, 22, 18, 20)
 HEAD_ROWS_MM = (
-    13.0,  # 0 номер заказа, номер и дата отгрузки
-    12.0,  # 1 получатель
-    11.0,  # 2 телефон
-    18.0,  # 3 адрес: 3 строки
-    17.0,  # 4 комментарий к адресу: 3 строки
-    24.0,  # 5 комментарий: 5 строк
-    10.0,  # 6 сумма и места
-    6.0,  # 7 отправитель
-    5.0,  # 8 отступ
-    8.0,  # 9 «Состав заказа» и число позиций
-    7.0,  # 10 шапка таблицы
+    13.0,  # 0 логотип, номер и дата отгрузки
+    13.0,  # 1 номер заказа
+    12.0,  # 2 получатель
+    11.0,  # 3 телефон
+    18.0,  # 4 адрес: 3 строки
+    17.0,  # 5 комментарий к адресу: 3 строки
+    24.0,  # 6 комментарий: 5 строк
+    10.0,  # 7 сумма и места
+    6.0,  # 8 отправитель
+    5.0,  # 9 отступ
+    8.0,  # 10 «Состав заказа» и число позиций
+    7.0,  # 11 шапка таблицы
 )
-TAG_ROW = len(HEAD_ROWS_MM)  # строка <jx:forEach>; jXLS её удаляет
+TAG_ROW = len(HEAD_ROWS_MM)  # строка <jx:forEach> (с 0); jXLS её удаляет
 ITEM_ROW_MM = 6.5
 
+THIN, MEDIUM = Side(style="thin"), Side(style="medium")
 
-def build(values: dict[str, str] | None = None, items: list[tuple[str, str, str]] | None = None) -> xlwt.Workbook:
+
+def _pt(mm: float) -> float:
+    return round(mm * 72 / 25.4, 1)
+
+
+def _cell(ws, r: int, c0: int, c1: int, value, size: float, *, bold: bool = False, horiz: str = "left",
+          vert: str = "center", wrap: bool = True, shrink: bool = False, top: Side | None = None,
+          box: bool = False, num: str = "") -> None:
+    """Значение в строку r (с 0), колонки c0..c1 (с 0) объединяются; top — линия сверху, box — рамка."""
+    cell = ws.cell(r + 1, c0 + 1, value)
+    cell.font = Font(name=FONT, size=size, bold=bold)
+    cell.alignment = Alignment(horizontal=horiz, vertical=vert, wrap_text=wrap and not shrink,
+                               shrink_to_fit=shrink)
+    if num:
+        cell.number_format = num
+    if top or box:
+        for c in range(c0, c1 + 1):
+            ws.cell(r + 1, c + 1).border = (Border(left=THIN, right=THIN, top=top or THIN, bottom=THIN)
+                                            if box else Border(top=top))
+    if c1 > c0:
+        ws.merge_cells(start_row=r + 1, start_column=c0 + 1, end_row=r + 1, end_column=c1 + 1)
+
+
+def build(values: dict[str, str] | None = None, items: list[tuple] | None = None) -> Workbook:
     """Собирает лист. values и items (название, кол-во, ед.) — для предпросмотра на реальной отгрузке:
     тогда вместо цикла jXLS пишутся готовые строки, как их развернёт МойСклад."""
     v = {**FIELDS, **(values or {})}
-    wb = xlwt.Workbook(encoding="utf-8")
-    # COUNTRY: без неё POI в МойСклад падает на цикле jXLS («CountryRecord not found»
-    # при сдвиге строк) — шаблон с таблицей печатается как «Некорректный шаблон».
-    wb.country_code = 7
-    ws = wb.add_sheet("Отгрузка")
-
+    wb = Workbook()
+    normal = next(st for st in wb._named_styles if st.name == "Normal")
+    normal.font = Font(name=FONT, size=10)  # ширина колонок в «символах» — по шрифту книги
+    ws = wb.active
+    ws.title = "Отгрузка"
     for i, mm in enumerate(COLS_MM):
-        ws.col(i).width = mm_to_colwidth(mm)
+        ws.column_dimensions["ABCDEF"[i]].width = round((mm / 25.4 * 96 - 5) / 7, 2)
     for i, mm in enumerate(HEAD_ROWS_MM):
-        row = ws.row(i)
-        row.height_mismatch = True
-        row.height = mm_to_twips(mm)
+        ws.row_dimensions[i + 1].height = _pt(mm)
 
-    sep = "medium"
-    label = style(10, vert="top")
+    logo = XlImage(str(LOGO))
+    logo.width = round(LOGO_MM / 25.4 * 96)
+    logo.height = round(logo.width * 239 / 1142)
+    ws.add_image(logo, "A1")
+    _cell(ws, 0, 3, 5, v["shipment"], 9, horiz="right", vert="top")
 
-    ws.write_merge(0, 0, 0, 2, v["number"], style(26, bold=True, wrap=False, shrink=True))
-    ws.write_merge(0, 0, 3, 5, v["shipment"], style(9, horiz="right"))
+    _cell(ws, 1, 0, 5, v["number"], 26, bold=True, wrap=False, shrink=True)
 
-    ws.write_merge(1, 1, 0, 1, "Получатель:", style(10, top=sep))
-    ws.write_merge(1, 1, 2, 5, v["recipient"], style(20, bold=True, wrap=False, shrink=True, top=sep))
+    _cell(ws, 2, 0, 1, "Получатель:", 10, top=MEDIUM)
+    _cell(ws, 2, 2, 5, v["recipient"], 20, bold=True, shrink=True, top=MEDIUM)
+    _cell(ws, 3, 0, 1, "Телефон:", 10)
+    _cell(ws, 3, 2, 5, v["phone"], 22, bold=True, shrink=True)
+    _cell(ws, 4, 0, 1, "Адрес:", 10, vert="top")
+    _cell(ws, 4, 2, 5, v["address"], 15, vert="top")
+    _cell(ws, 5, 0, 1, "К адресу:", 10, vert="top")
+    _cell(ws, 5, 2, 5, v["address_note"], 12, bold=True, vert="top")
+    _cell(ws, 6, 0, 1, "Комментарий:", 10, vert="top", top=THIN)
+    _cell(ws, 6, 2, 5, v["comment"], 11, vert="top", top=THIN)
 
-    ws.write_merge(2, 2, 0, 1, "Телефон:", style(10))
-    ws.write_merge(2, 2, 2, 5, v["phone"], style(22, bold=True, wrap=False, shrink=True))
-
-    ws.write_merge(3, 3, 0, 1, "Адрес:", label)
-    ws.write_merge(3, 3, 2, 5, v["address"], style(15, vert="top"))
-
-    ws.write_merge(4, 4, 0, 1, "К адресу:", label)
-    ws.write_merge(4, 4, 2, 5, v["address_note"], style(12, bold=True, vert="top"))
-
-    ws.write_merge(5, 5, 0, 1, "Комментарий:", style(10, vert="top", top="thin"))
-    ws.write_merge(5, 5, 2, 5, v["comment"], style(11, vert="top", top="thin"))
-
-    ws.write_merge(6, 6, 0, 1, "Сумма:", style(10, top=sep))
-    sum_style = style(16, bold=True, wrap=False, top=sep, num='#,##0.00" руб."')
+    _cell(ws, 7, 0, 1, "Сумма:", 10, top=MEDIUM)
     try:
-        ws.write(6, 2, float(v["sum"]), sum_style)
+        sum_value = float(v["sum"])
     except ValueError:
-        ws.write(6, 2, v["sum"], sum_style)
-    ws.write(6, 3, "Мест:", style(10, horiz="right", top=sep))
-    ws.write_merge(6, 6, 4, 5, "________", style(14, top=sep))
+        sum_value = v["sum"]
+    _cell(ws, 7, 2, 2, sum_value, 16, bold=True, wrap=False, top=MEDIUM, num='#,##0.00" руб."')
+    _cell(ws, 7, 3, 3, "Мест:", 10, horiz="right", top=MEDIUM)
+    _cell(ws, 7, 4, 5, "________", 14, top=MEDIUM)
+    _cell(ws, 8, 0, 5, v["sender"], 9, shrink=True, top=THIN)
 
-    ws.write_merge(7, 7, 0, 5, v["sender"], style(9, wrap=False, shrink=True, top="thin"))
+    _cell(ws, 10, 0, 2, "СОСТАВ ЗАКАЗА", 13, bold=True, wrap=False)
+    _cell(ws, 10, 3, 5, v["count"], 10, horiz="right", wrap=False)
+    for c0, c1, title in ((0, 0, "№"), (1, 2, "Наименование"), (3, 3, "Кол-во"), (4, 4, "Ед."), (5, 5, "✓")):
+        _cell(ws, 11, c0, c1, title, 10, bold=True, horiz="center", box=True)
 
-    ws.write_merge(9, 9, 0, 2, "СОСТАВ ЗАКАЗА", style(13, bold=True, wrap=False))
-    ws.write_merge(9, 9, 3, 5, v["count"], style(10, horiz="right", wrap=False))
-
-    head = style(10, bold=True, horiz="center", box="thin")
-    ws.write(10, 0, "№", head)
-    ws.write_merge(10, 10, 1, 2, "Наименование", head)
-    ws.write(10, 3, "Кол-во", head)
-    ws.write(10, 4, "Ед.", head)
-    ws.write(10, 5, "✓", head)
-
-    num = style(10, horiz="center", box="thin")
-    name = style(10, wrap=False, shrink=True, box="thin")
-    qty = style(11, bold=True, horiz="center", box="thin")
-    uom = style(10, horiz="center", box="thin")
-    check = style(10, box="thin")
-
-    def item_row(r: int, n: int | str, title: str, q: float | str, u: str) -> None:
-        row = ws.row(r)
-        row.height_mismatch = True
-        row.height = mm_to_twips(ITEM_ROW_MM)
-        ws.write(r, 0, n, num)
-        ws.write_merge(r, r, 1, 2, title, name)
-        ws.write(r, 3, q, qty)
-        ws.write(r, 4, u, uom)
-        ws.write(r, 5, "", check)
+    def item(r: int, n, title, q, u) -> None:
+        ws.row_dimensions[r + 1].height = _pt(ITEM_ROW_MM)
+        _cell(ws, r, 0, 0, n, 10, horiz="center", box=True)
+        _cell(ws, r, 1, 2, title, 10, shrink=True, box=True)
+        _cell(ws, r, 3, 3, q, 11, bold=True, horiz="center", box=True)
+        _cell(ws, r, 4, 4, u, 10, horiz="center", box=True)
+        _cell(ws, r, 5, 5, "", 10, box=True)
 
     if items is None:
         # Цикл jXLS, как в download-template/demand_check.xls: номер строки — формулой
         # $[ROW() - ROW(A<строка тега>)], строки с тегами МойСклад удаляет при печати.
-        ws.write(TAG_ROW, 0, '<jx:forEach items="${o.shipments}" var="position">')
-        item_row(TAG_ROW + 1, f"$[ROW() - ROW(A{TAG_ROW})]", "${position.printName}",
-                 "${position.quantity}", "${position.consignment.good.uom.name}")
-        ws.write(TAG_ROW + 2, 0, "</jx:forEach>")
+        ws.cell(TAG_ROW + 1, 1, '<jx:forEach items="${o.shipments}" var="position">')
+        item(TAG_ROW + 1, f"$[ROW() - ROW(A{TAG_ROW})]", "${position.printName}",
+             "${position.quantity}", "${position.consignment.good.uom.name}")
+        ws.cell(TAG_ROW + 3, 1, "</jx:forEach>")
     else:
         for i, (title, q, u) in enumerate(items):
-            item_row(TAG_ROW + i, i + 1, title, q, u)
+            item(TAG_ROW + i, i + 1, title, q, u)
 
     # Страница: A4 книжная, без колонтитулов, по ширине — один лист, по высоте — сколько нужно.
-    ws.header_str = b""  # xlwt на Python 3 принимает здесь только bytes
-    ws.footer_str = b""
-    ws.header_margin = ws.footer_margin = 0
-    ws.left_margin = ws.right_margin = ws.top_margin = ws.bottom_margin = MARGIN_MM / 25.4
-    ws.portrait = True
-    ws.paper_size_code = 9  # A4
-    ws.fit_num_pages = 1
-    ws.fit_width_to_pages = 1
-    ws.fit_height_to_pages = 0
-    ws.show_grid = False
-    fix_page_block(ws)
+    ws.page_setup.paperSize = ws.PAPERSIZE_A4
+    ws.page_setup.orientation = "portrait"
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
+    m = ws.page_margins
+    m.left = m.right = m.top = m.bottom = MARGIN_MM / 25.4
+    m.header = m.footer = 0
+    ws.sheet_view.showGridLines = False
     return wb
 
 
 def main() -> None:
-    out = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).with_name("shipment_a4.xls")
-    build().save(str(out))
-    print(out)
+    out = Path(sys.argv[1]) if len(sys.argv) > 1 else OUT
+    print(to_xls(build(), out))
 
 
 if __name__ == "__main__":
