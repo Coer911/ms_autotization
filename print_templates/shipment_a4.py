@@ -73,6 +73,9 @@ def build(values: dict[str, str] | None = None, items: list[tuple[str, str, str]
     тогда вместо цикла jXLS пишутся готовые строки, как их развернёт МойСклад."""
     v = {**FIELDS, **(values or {})}
     wb = xlwt.Workbook(encoding="utf-8")
+    # COUNTRY: без неё POI в МойСклад падает на цикле jXLS («CountryRecord not found»
+    # при сдвиге строк) — шаблон с таблицей печатается как «Некорректный шаблон».
+    wb.country_code = 7
     ws = wb.add_sheet("Отгрузка")
 
     for i, mm in enumerate(COLS_MM):

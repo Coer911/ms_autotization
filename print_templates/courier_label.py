@@ -135,6 +135,9 @@ def build(values: dict[str, str] | None = None) -> xlwt.Workbook:
     """Собирает стикер. values подменяет выражения МойСклад — для предпросмотра на примере заказа."""
     v = {**FIELDS, **(values or {})}
     wb = xlwt.Workbook(encoding="utf-8")
+    # COUNTRY: без неё POI в МойСклад падает на цикле jXLS («CountryRecord not found»
+    # при сдвиге строк) — шаблон с таблицей печатается как «Некорректный шаблон».
+    wb.country_code = 7
     ws = wb.add_sheet("Стикер")
 
     for i, mm in enumerate(COLS_MM):
