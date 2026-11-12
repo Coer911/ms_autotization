@@ -51,6 +51,9 @@ class Settings:
     bot_model: str = "claude-opus-5-5"
     bot_effort: str = "medium"        # low | medium | high — глубина размышлений и цена ответа
     anthropic_ready: bool = False     # задан ли ANTHROPIC_API_KEY (сам ключ читает SDK)
+    order_bot_token: str = ""         # свой токен бота очереди, не TELEGRAM_BOT_TOKEN
+    order_chat: str = ""              # один закрытый чат-очередь
+    order_organization: str = ""      # юрлицо заказа покупателя, часть названия
     automations: dict = field(default_factory=dict)
     bot: dict = field(default_factory=dict)       # секция bot: в config.yaml
 
@@ -85,6 +88,9 @@ class Settings:
             bot_model=env.get("HUB_BOT_MODEL", "") or cls.bot_model,
             bot_effort=env.get("HUB_BOT_EFFORT", "") or cls.bot_effort,
             anthropic_ready=bool(env.get("ANTHROPIC_API_KEY")),
+            order_bot_token=env.get("ORDER_BOT_TOKEN", "").strip(),
+            order_chat=env.get("HUB_ORDER_CHAT", "").strip(),
+            order_organization=env.get("HUB_ORDER_ORGANIZATION", "").strip(),
         )
         if s.role not in ROLES:
             raise ValueError(f"HUB_ROLE={s.role}: можно {', '.join(ROLES)}")
@@ -95,8 +101,30 @@ class Settings:
 
     @property
     def bot_ready(self) -> bool:
-        """Telegram-бот запускается, только когда настроено всё нужное."""
+        """Справочный Telegram-бот запускается, только когда настроено всё нужное."""
         return bool(self.anthropic_ready and self.telegram_token and self.bot_chats)
+
+    @property
+    def order_bot_ready(self) -> bool:
+        """Бот очереди: свой токен, один чат, юрлицо. Общий токен со справочным ботом не годится."""
+        if not (self.order_bot_token and self.order_chat and self.order_organization):
+            return False
+        return not self.telegram_token or self.order_bot_token != self.telegram_token
+
+    def order_bot_issue(self) -> str:
+        """Почему бот очереди не запущен. Пусто, если он не настраивался или готов."""
+        if self.telegram_token and self.order_bot_token and self.order_bot_token == self.telegram_token:
+            return "ORDER_BOT_TOKEN совпадает с TELEGRAM_BOT_TOKEN: бот очереди не запущен"
+        if not (self.order_bot_token or self.order_chat or self.order_organization):
+            return ""
+        missing = [name for name, value in (
+            ("ORDER_BOT_TOKEN", self.order_bot_token),
+            ("HUB_ORDER_CHAT", self.order_chat),
+            ("HUB_ORDER_ORGANIZATION", self.order_organization),
+        ) if not value]
+        if missing:
+            return "бот очереди не запущен, не задано: " + ", ".join(missing)
+        return ""
 
     @property
     def webhook_url(self) -> str:

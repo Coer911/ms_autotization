@@ -44,6 +44,9 @@ class FakeMoySklad:
         self.customentities: dict[str, list[dict]] = {}
         self.publications: dict[str, list] = {}
         self.webhooks: list[dict] = []
+        self.organizations: list[dict] = []
+        self.products: list[dict] = []
+        self.stock: list[dict] = []
         self.calls: list[tuple[str, str]] = []
         self.violations: list[str] = []
         self.exports = 0
@@ -88,6 +91,24 @@ class FakeMoySklad:
             c["state"] = self.state("counterparty", state)
         self.db["counterparty"][id_] = c
         return c
+
+    def add_organization(self, name: str = "ИП Культура", id_: str | None = None) -> dict:
+        id_ = id_ or str(uuid.uuid4())
+        org = {**meta("organization", id_), "id": id_, "name": name}
+        self.organizations.append(org)
+        return org
+
+    def add_product(self, name: str, price_kop: float = 0, *, id_: str | None = None,
+                    archived: bool = False) -> dict:
+        """Товар и строка остатка. price_kop — копейки, как salePrices в JSON API."""
+        id_ = id_ or str(uuid.uuid4())
+        product = {**meta("product", id_), "id": id_, "name": name, "archived": archived,
+                   "salePrices": [{"value": price_kop}] if price_kop else []}
+        self.products.append(product)
+        if not archived:
+            self.stock.append({**meta("product", id_), "name": name, "stock": 1,
+                               "salePrice": price_kop, "price": 0})
+        return product
 
     def _document(self, type_: str, number: str, state: str, agent: dict | None, sum_kop: int,
                   organization: str, applicable: bool) -> dict:
@@ -199,14 +220,67 @@ class FakeMoySklad:
         if path.startswith("download/"):
             return httpx.Response(302, headers={
                 "Location": "https://files.moysklad.example/" + path.split("/", 1)[1]})
+        if path == "report/stock/all":
+            return self._page(self._stock_rows(q), q)
         if m := re.fullmatch(r"entity/(\w+)", path):
-            if m.group(1) in self.db:
-                return self.listing(m.group(1), q)
+            t = m.group(1)
+            if method == "POST" and t == "customerorder":
+                # docs/moysklad-api/documents/_customerOrder.md — «Создать Заказ покупателя»
+                return self.create_customerorder(body or {})
+            if t == "organization":
+                return self._page(self.organizations, q)
+            if t == "product":
+                return self._page(self._product_rows(q), q)
+            if t in self.db:
+                return self.listing(t, q)
         if m := re.fullmatch(r"entity/(\w+)/([\w-]+)(?:/(export|publication))?", path):
             t, id_, sub = m.groups()
             if t in self.db:
                 return self.one(method, t, id_, sub, body)
         return error(404, f"нет такого ресурса {path}")
+
+    def _page(self, rows: list, q: dict) -> httpx.Response:
+        limit, offset = int(q.get("limit", 1000)), int(q.get("offset", 0))
+        return httpx.Response(200, json={"meta": {"size": len(rows), "limit": limit, "offset": offset},
+                                         "rows": rows[offset:offset + limit]})
+
+    def _words(self, text: str) -> list[str]:
+        return text.casefold().split()
+
+    def _product_rows(self, q: dict) -> list[dict]:
+        words = self._words(q.get("search", ""))
+        rows = [p for p in self.products if all(w in p["name"].casefold() for w in words)]
+        if "archived=false" in q.get("filter", ""):
+            rows = [p for p in rows if not p.get("archived")]
+        return rows
+
+    def _stock_rows(self, q: dict) -> list[dict]:
+        search = ""
+        for part in q.get("filter", "").split(";"):
+            if part.startswith("search="):
+                search = part[len("search="):]
+        words = self._words(search)
+        return [r for r in self.stock if all(w in r["name"].casefold() for w in words)]
+
+    def create_customerorder(self, body: dict) -> httpx.Response:
+        org = (body.get("organization") or {}).get("meta", {}).get("href")
+        agent = (body.get("agent") or {}).get("meta", {}).get("href")
+        if not org or not agent:
+            return error(412, "organization и agent обязательны")
+        for pos in body.get("positions") or []:
+            href = (pos.get("assortment") or {}).get("meta", {}).get("href")
+            if not href or not pos.get("quantity"):
+                return error(412, "у позиции нужны assortment и quantity")
+        id_ = str(uuid.uuid4())
+        number = f"{len(self.db['customerorder']) + 1:05d}"
+        doc = {**meta("customerorder", id_), "id": id_, "name": body.get("name") or number,
+               "description": body.get("description") or "",
+               "organization": body.get("organization"), "agent": body.get("agent"),
+               "positions": body.get("positions") or [], "updated": self.tick(),
+               "applicable": body.get("applicable", True), "sum": 0, "attributes": [],
+               "state": self.state("customerorder", "Новый")}
+        self.db["customerorder"][id_] = doc
+        return httpx.Response(200, json=doc)
 
     def listing(self, t: str, q: dict) -> httpx.Response:
         rows = list(self.db[t].values())

@@ -5,6 +5,7 @@
   telegram.py  — Telegram long polling, белый список чатов.
 
 Включается, когда заданы ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN и HUB_BOT_CHATS.
+Заказ покупателя из чата-очереди сюда не входит: его создаёт hub/orders со своим токеном.
 """
 from __future__ import annotations
 
