@@ -29,6 +29,8 @@ class DailyUPD(Automation):
     kind = "daily_upd"
     title = "УПД за день покупателям"
     scheduled = True
+    # Тип печати и доп. полей. В опрос и вебхуки scheduled не попадает.
+    entities = ("demand",)
     defaults = {
         "at": "17:00",
         "template": "УПД",

@@ -91,6 +91,7 @@ async def test_states_filter_and_dry_run(fake, make_hub):
     day_of_shipments(fake)
     outcome = (await hub.engine.scheduled(AT_17))[0]
     assert hub.channels.emails == []                       # dry-run: ничего не ушло
+    assert [method for method, _ in fake.calls if method in ("PUT", "DELETE", "PATCH")] == []
     assert {tuple(x["files"]) for x in hub.channels.sent} == {
         ("УПД D1 от 25.10.2026.pdf",), ("УПД D2 от 25.10.2026.pdf",)}
     assert "статус «ОТПРАВЛЕН В ЭДО» — 1" in outcome.detail

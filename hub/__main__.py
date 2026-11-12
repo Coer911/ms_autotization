@@ -84,23 +84,28 @@ async def cmd_check(s: Settings) -> int:
             p = a.params
             if a.scheduled:
                 ok(f"{a.name}: по расписанию в {p.get('at')}")
-                continue
-            for key, type_ in (("state", a.entity), ("state_after", a.entity),
-                               ("order_state", "customerorder"), ("set_state", a.entity)):
-                if p.get(key):
-                    try:
-                        await ms_fields.find_state(ms, type_, p[key])
-                        ok(f"{a.name}: статус «{p[key]}» ({type_})")
-                    except FieldError as e:
-                        bad(f"{a.name}: {e}")
-                        errors += 1
+            else:
+                for key, type_ in (("state", a.entity), ("state_after", a.entity),
+                                   ("order_state", "customerorder"), ("set_state", a.entity)):
+                    if p.get(key):
+                        try:
+                            await ms_fields.find_state(ms, type_, p[key])
+                            ok(f"{a.name}: статус «{p[key]}» ({type_})")
+                        except FieldError as e:
+                            bad(f"{a.name}: {e}")
+                            errors += 1
+            # Плановые тоже: у daily_upd шаблон «УПД», иначе опечатка всплывёт только в 17:00.
             if p.get("template"):
-                try:
-                    tpl = await ms.find_template(a.entity, p["template"])
-                    ok(f"{a.name}: шаблон «{tpl['name']}»")
-                except MoySkladError as e:
-                    bad(f"{a.name}: {e.message}")
+                if not a.entity:
+                    bad(f"{a.name}: шаблон «{p['template']}», а тип сущности не задан")
                     errors += 1
+                else:
+                    try:
+                        tpl = await ms.find_template(a.entity, p["template"])
+                        ok(f"{a.name}: шаблон «{tpl['name']}»")
+                    except MoySkladError as e:
+                        bad(f"{a.name}: {e.message}")
+                        errors += 1
             names = ([p["mark_field"]] if p.get("mark_field") else []) + list(p.get("fields") or {})
             for name in names:
                 try:
