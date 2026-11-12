@@ -8,6 +8,9 @@
 - `moysklad-api` — любой код, который ходит в МойСклад: сверяйся с `docs/moysklad-api`, не с памятью.
 - `new-automation` — новая автоматизация или новый тип сущности.
 - `deploy-hub` — Dockhost, переменные, переход из dry-run в боевой режим, неисправности.
+- `error-handling` — типизированные ошибки, retry, circuit breaker, сообщения пользователю (TS/Python/Go).
+- `docker-patterns` — Dockerfile/Compose, security, volumes, multi-service; рядом с `deploy-hub` для общего Docker.
+- `counterparty-channel-discipline` — агент в общих чатах с клиентами/поставщиками: mention gating, тишина по умолчанию, без утечки внутреннего контекста.
 
 ## Правила
 
