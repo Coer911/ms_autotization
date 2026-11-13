@@ -5,8 +5,9 @@
   worker     — разбор очереди и повторы; реплик сколько угодно (нужен PostgreSQL);
   scheduler  — опрос МойСклад и плановые автоматизации; активен ровно один —
                лишние реплики ждут advisory lock в PostgreSQL.
-  bot        — только Telegram-бот (он же работает внутри all, когда настроен);
+  bot        — только Telegram-боты (они же работают внутри all, когда настроены);
                одна реплика: getUpdates одним токеном может слушать один процесс.
+               Справочный бот и бот очереди — два токена и два цикла в этом процессе.
 
 Масштабирование = тот же образ, другая HUB_ROLE. Код автоматизаций не меняется.
 """
@@ -49,6 +50,7 @@ class Hub:
         self._tasks: list[asyncio.Task] = []
         self._agent = None
         self._bot = None
+        self._order_bot = None
 
     @classmethod
     async def create(cls, settings: Settings, **kw) -> Hub:
@@ -121,13 +123,27 @@ class Hub:
         if role in ("all", "scheduler"):
             self._tasks.append(asyncio.create_task(self._scheduler(), name="scheduler"))
         if role in ("all", "bot"):
+            started_bot = False
             if self.settings.bot_ready:
                 from .bot.telegram import TelegramBot
                 self._bot = TelegramBot(self.settings.telegram_token, self.agent,
                                         set(self.settings.bot_chats))
                 self._tasks.append(asyncio.create_task(self._bot.run(), name="bot"))
-            elif role == "bot":
-                raise RuntimeError("роль bot: нужны ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN и HUB_BOT_CHATS")
+                started_bot = True
+            if issue := self.settings.order_bot_issue():
+                log.warning("%s", issue)
+            elif self.settings.order_bot_ready:
+                if self.settings.order_chat in self.settings.bot_chats:
+                    log.warning("чат очереди %s есть в HUB_BOT_CHATS: справочный бот тоже будет там отвечать",
+                                self.settings.order_chat)
+                from .orders import make_order_bot
+                self._order_bot = make_order_bot(self.settings, self.ms, self.storage)
+                self._tasks.append(asyncio.create_task(self._order_bot.run(), name="order-bot"))
+                started_bot = True
+            if role == "bot" and not started_bot:
+                raise RuntimeError(
+                    "роль bot: нужны ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN и HUB_BOT_CHATS"
+                    " или бот очереди (ORDER_BOT_TOKEN, HUB_ORDER_CHAT, HUB_ORDER_ORGANIZATION)")
 
     async def stop(self) -> None:
         for t in self._tasks:
@@ -136,6 +152,8 @@ class Hub:
         self._tasks = []
         if self._bot:
             await self._bot.close()
+        if self._order_bot:
+            await self._order_bot.close()
         await self.ms.close()
         await self.channels.close()
         await self.storage.close()

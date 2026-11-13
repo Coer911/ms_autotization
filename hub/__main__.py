@@ -148,6 +148,12 @@ async def cmd_check(s: Settings) -> int:
                                   if s.smtp_host else "почта не настроена (SMTP_HOST)")
     (ok if s.telegram_token else warn)("Telegram: токен задан" if s.telegram_token
                                        else "Telegram не настроен (TELEGRAM_BOT_TOKEN)")
+    if s.order_bot_ready:
+        ok(f"бот очереди: чат {s.order_chat}, организация «{s.order_organization}»")
+        if s.order_chat in s.bot_chats:
+            warn(f"чат очереди {s.order_chat} есть в HUB_BOT_CHATS: справочный бот тоже будет там отвечать")
+    elif issue := s.order_bot_issue():
+        warn(issue)
     print("\nГотово к работе" if not errors else f"\nПроблем: {errors}")
     return 1 if errors else 0
 

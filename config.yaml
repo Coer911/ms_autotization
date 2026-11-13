@@ -87,6 +87,8 @@ automations:
 
 # Telegram-бот и POST /api/ask: вопросы по МойСклад обычным языком, только чтение.
 # Включается переменными ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN, HUB_BOT_CHATS (.env.example).
+# Бот очереди заказов сюда не входит и этот чат в HUB_BOT_CHATS не добавляют:
+# ORDER_BOT_TOKEN, HUB_ORDER_CHAT, HUB_ORDER_ORGANIZATION.
 bot:
   # «покупатели», отгрузки которым — не продажа, а перемещение (например, на Озон):
   # в выручке и долгах их не считаем, пока не спросят явно. Часть названия.
