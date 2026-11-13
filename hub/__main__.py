@@ -1,7 +1,8 @@
 """Командная строка: python -m hub <команда>.
 
   serve [--role all|api|worker|scheduler]  — запуск (так стартует Docker)
-  check                                     — токен, config.yaml, статусы, шаблоны, поля, вебхуки
+  check                                     — обязательное: токен, шаблон УПД, чтение отгрузок;
+                                             вебхуки административные (30004/403 → SKIPPED)
   states|templates|fields <тип>             — справочники: orders, shipments, counterparties
   setup                                     — создать доп. поля-отметки, которых не хватает
   webhooks list|install|remove              — вебхуки МойСклад на нужные типы
@@ -24,7 +25,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from .automations import ConfigError, build, event_types
+from .automations import Automation, ConfigError, build, event_types
 from .entities import TYPES, from_api, resolve_type
 from .events import Event
 from .moysklad import FieldError, MoySklad, MoySkladError
@@ -45,6 +46,20 @@ def bad(text: str) -> None:
 
 def warn(text: str) -> None:
     print(f"  ⚠️  {text}")
+
+
+def skipped(text: str) -> None:
+    print(f"  SKIPPED {text}")
+
+
+# GET /entity/webhook только у администратора (dictionaries/_webhook.md).
+# Код 30004 — «Необходимы права администратора» (_errors.md); HTTP 403 — нет прав на просмотр
+# (_general.md). Это не успешная проверка вебхуков и не повод расширять права сотрудника.
+WEBHOOK_ADMIN_CODE = 30004
+
+
+def webhook_access_denied(exc: MoySkladError) -> bool:
+    return exc.status == 403 or WEBHOOK_ADMIN_CODE in exc.codes
 
 
 def client(s: Settings) -> MoySklad:
@@ -76,10 +91,15 @@ async def cmd_check(s: Settings) -> int:
                               ("HUB_WEBHOOK_SECRET", s.webhook_secret, "вебхуки не принимаются"),
                               ("HUB_PUBLIC_URL", s.public_url, "вебхуки не установить")):
         (ok if value else warn)(f"{name} {'задан' if value else 'не задан — ' + need}")
-    print("МойСклад")
+    print("МойСклад, обязательно")
     async with client(s) as ms:
-        me = await ms.me()
-        ok(f"токен работает: {me.get('name') or me.get('uid')}")
+        try:
+            me = await ms.me()
+        except MoySkladError as e:
+            bad(f"токен: {e.message}")
+            errors += 1
+        else:
+            ok(f"токен работает: {me.get('name') or me.get('uid')}")
         for a in autos:
             p = a.params
             if a.scheduled:
@@ -114,13 +134,15 @@ async def cmd_check(s: Settings) -> int:
                 except FieldError as e:
                     bad(f"{a.name}: {e}" + (" — python -m hub setup" if name == p.get("mark_field") else ""))
                     errors += 1
-        hooks = await ms.webhooks()
-        for type_ in event_types(autos):
-            mine = [h for h in hooks if h.get("entityType") == type_ and h.get("url") == s.webhook_url]
-            if s.webhook_url and len(mine) == len(HOOK_ACTIONS):
-                ok(f"вебхуки {type_} ведут сюда")
-            else:
-                warn(f"вебхуков {type_} на хаб нет — работает только опрос (python -m hub webhooks install)")
+            # daily_upd.shipments читает entity/demand до печати. POST export check не вызывает.
+            if a.kind == "daily_upd":
+                try:
+                    await ms.get("entity/demand", limit=1)
+                    ok(f"{a.name}: чтение отгрузок доступно")
+                except MoySkladError as e:
+                    bad(f"{a.name}: нет чтения отгрузок ({e.message})")
+                    errors += 1
+        errors += await _check_webhooks(ms, s, autos)
     print("Каналы")
     (ok if s.smtp_host else warn)(f"почта: {s.smtp_user or s.smtp_from}@{s.smtp_host}:{s.smtp_port}"
                                   if s.smtp_host else "почта не настроена (SMTP_HOST)")
@@ -128,6 +150,40 @@ async def cmd_check(s: Settings) -> int:
                                        else "Telegram не настроен (TELEGRAM_BOT_TOKEN)")
     print("\nГотово к работе" if not errors else f"\nПроблем: {errors}")
     return 1 if errors else 0
+
+
+def _denied_webhook_text(exc: MoySkladError) -> str:
+    codes = ", ".join(str(c) for c in exc.codes) if exc.codes else "нет в теле"
+    return (
+        "вебхуки: нет доступа к GET /entity/webhook "
+        f"(HTTP {exc.status}, код {codes}: {exc.message}). "
+        "Это не успешная проверка вебхуков и не повод расширять права сотрудника. "
+        "Пробный daily_upd обходится токеном, шаблоном «УПД» отгрузки и чтением отгрузок."
+    )
+
+
+async def _check_webhooks(ms: MoySklad, s: Settings, autos: list[Automation]) -> int:
+    """GET /entity/webhook. Отказ в доступе — SKIPPED и 0. Прочая ошибка API — 1."""
+    print("Администрирование")
+    try:
+        hooks = await ms.webhooks()
+    except MoySkladError as e:
+        if webhook_access_denied(e):
+            skipped(_denied_webhook_text(e))
+            return 0
+        bad(f"вебхуки: {e.message}")
+        return 1
+    types = event_types(autos)
+    if not types:
+        ok("GET /entity/webhook доступен, событийным автоматизациям вебхуки не нужны")
+        return 0
+    for type_ in types:
+        mine = [h for h in hooks if h.get("entityType") == type_ and h.get("url") == s.webhook_url]
+        if s.webhook_url and len(mine) == len(HOOK_ACTIONS):
+            ok(f"вебхуки {type_} ведут сюда")
+        else:
+            warn(f"вебхуков {type_} на хаб нет — работает только опрос (python -m hub webhooks install)")
+    return 0
 
 
 async def cmd_reference(s: Settings, what: str, kind: str) -> int:
