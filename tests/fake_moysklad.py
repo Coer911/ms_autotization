@@ -30,8 +30,10 @@ def meta(kind: str, id_: str, path: str = "") -> dict:
                      "mediaType": "application/json"}}
 
 
-def error(status: int, text: str) -> httpx.Response:
-    return httpx.Response(status, json={"errors": [{"error": text, "code": status}]})
+def error(status: int, text: str, code: int | None = None) -> httpx.Response:
+    # code в теле — код API (_general.md), не HTTP. По умолчанию в подделке совпадает со статусом.
+    return httpx.Response(status, json={"errors": [{
+        "error": text, "code": status if code is None else code}]})
 
 
 class FakeMoySklad:
@@ -46,6 +48,9 @@ class FakeMoySklad:
         self.webhooks: list[dict] = []
         self.calls: list[tuple[str, str]] = []
         self.violations: list[str] = []
+        self.template_names = {kind: list(names) for kind, names in TEMPLATES.items()}
+        # path → (HTTP, текст, код API или None). Любой метод на этом пути отвечает ошибкой.
+        self.http_errors: dict[str, tuple[int, str, int | None]] = {}
         self.exports = 0
         self.throttle_next = 0
         self._clock = 0
@@ -165,6 +170,9 @@ class FakeMoySklad:
         return self.route(request.method, path, q, body)
 
     def route(self, method: str, path: str, q: dict, body) -> httpx.Response:
+        if path in self.http_errors:
+            status, text, code = self.http_errors[path]
+            return error(status, text, code)
         if path == "context/employee":
             return httpx.Response(200, json={"name": "Робот хаба", "uid": "robot@cultura"})
         if m := re.fullmatch(r"entity/(\w+)/metadata", path):
@@ -175,7 +183,7 @@ class FakeMoySklad:
                          "size": len(self.attributes.get(t, [])), "limit": 1000, "offset": 0}}})
         if m := re.fullmatch(r"entity/(\w+)/metadata/(embeddedtemplate|customtemplate)", path):
             t, kind = m.groups()
-            names = TEMPLATES.get(t, []) if kind == "embeddedtemplate" else []
+            names = self.template_names.get(t, []) if kind == "embeddedtemplate" else []
             return httpx.Response(200, json={"rows": [
                 {**meta(kind, f"tpl-{t}-{i}", f"{t}/metadata/{kind}"), "id": f"tpl-{t}-{i}", "name": n}
                 for i, n in enumerate(names)]})

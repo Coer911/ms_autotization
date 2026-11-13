@@ -43,22 +43,39 @@ def user_token_budget(today: date | None = None) -> int:
 
 
 class MoySkladError(Exception):
-    def __init__(self, status: int, message: str, url: str = ""):
+    def __init__(self, status: int, message: str, url: str = "", codes: tuple[int, ...] = ()):
         super().__init__(f"МойСклад {status}: {message}" + (f" ({url})" if url else ""))
         self.status = status
         self.message = message
         self.url = url
+        # Код из errors[].code (_general.md, «Структура объекта error»). Пусто — смотреть HTTP status.
+        self.codes = tuple(codes)
 
     @classmethod
     def from_response(cls, r: httpx.Response) -> MoySkladError:
         message = r.reason_phrase
+        codes: list[int] = []
         try:
             errors = r.json().get("errors") or []
-            if errors:
-                message = "; ".join(e.get("error", "") for e in errors)
+            texts = []
+            for item in errors:
+                if not isinstance(item, dict):
+                    continue
+                text = item.get("error")
+                if text:
+                    texts.append(str(text))
+                raw = item.get("code")
+                if isinstance(raw, bool):
+                    continue
+                if isinstance(raw, int):
+                    codes.append(raw)
+                elif isinstance(raw, str) and raw.isdigit():
+                    codes.append(int(raw))
+            if texts:
+                message = "; ".join(texts)
         except Exception:
             pass
-        return cls(r.status_code, message, str(r.request.url))
+        return cls(r.status_code, message, str(r.request.url), tuple(codes))
 
 
 class NotFound(MoySkladError):
