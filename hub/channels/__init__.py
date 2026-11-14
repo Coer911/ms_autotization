@@ -86,6 +86,37 @@ class Channels:
         self.sent.append({"kind": "webhook", "url": url})
         return f"вебхук {url}"
 
+    async def route_note(self, action: str, **info) -> str:
+        """Строка журнала маршрута. В пробном режиме HTTP нет: сюда пишут WOULD_*."""
+        self.sent.append({"kind": action, "dry_run": self.s.dry_run, **info})
+        log.info("%s %s %s", "DRY RUN" if self.s.dry_run else "ROUTE", action, info)
+        return action
+
+    def _route(self):
+        if self.s.dry_run:
+            raise ChannelError("HUB_DRY_RUN: запись в Google запрещена")
+        client = getattr(self, "_route_client", None)
+        if client is None:
+            from .route_sheet import GoogleRouteSheet
+            client = GoogleRouteSheet.from_env(self.http)
+            self._route_client = client
+        return client
+
+    async def route_find_file(self, folder_id: str, title: str) -> str | None:
+        return await self._route().find_file(folder_id, title)
+
+    async def route_create_file(self, folder_id: str, template_id: str, title: str, day: str) -> str:
+        return await self._route().create_file(folder_id, template_id, title, day)
+
+    async def route_prepare(self, file_id: str, day: str) -> str:
+        return await self._route().prepare(file_id, day)
+
+    async def route_find_order(self, file_id: str, day: str, order_id: str) -> dict | None:
+        return await self._route().find_order(file_id, day, order_id)
+
+    async def route_write_order(self, file_id: str, day: str, fields: dict, row: int | None) -> int:
+        return await self._route().write_order(file_id, day, fields, row)
+
     async def alert(self, text: str) -> None:
         """Сообщить людям, что автоматизация сдалась. Ошибку алерта только логируем."""
         log.error("ALERT %s", text)
