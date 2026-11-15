@@ -198,7 +198,7 @@ class LogisticsSheet(Automation):
         hours = self._hours(obj)
         file_id, created = await self._ensure_file(ctx, day, record)
         hit = await ctx.channels.route_find_order(file_id, day_text(day), obj.id)
-        fields = self._fields(obj, address, phone, hours, hit, record)
+        fields, address_note = self._fields(obj, address, phone, hours, hit, record)
         if hit:
             await ctx.channels.route_write_order(file_id, day_text(day), fields, hit["row"])
             action = "UPDATE_ORDER"
@@ -208,10 +208,14 @@ class LogisticsSheet(Automation):
         record["file_id"] = file_id
         record["phone_written"] = True
         await ctx.storage.set(_order_key(obj.id), json.dumps(record, ensure_ascii=False))
+        if address_note:
+            log.warning("%s", address_note)
+            await ctx.channels.route_note(
+                "ADDRESS_DIFF", order_id=obj.id, route=record["route_date"], detail=address_note)
         actions = (["CREATE_ROUTE"] if created else []) + [action]
         for name in actions:
             await ctx.channels.route_note(name, order_id=obj.id, route=record["route_date"])
-        return " ".join(actions)
+        return " ".join(actions + ([address_note] if address_note else []))
 
     async def _dry(self, ctx: Context, obj: Entity, record: dict, day: date, had_record: bool) -> str:
         file_raw = await ctx.storage.get(_file_key(day))
@@ -278,13 +282,14 @@ class LogisticsSheet(Automation):
             raise
 
     def _fields(self, obj: Entity, address: str, phone: str, hours: str,
-                hit: dict | None, record: dict) -> dict:
+                hit: dict | None, record: dict) -> tuple[dict, str]:
         fields: dict = {
             "order_id": obj.id,
             "counterparty": obj.agent.name,
-            "address": address,
         }
+        note = ""
         if hit is None:
+            fields["address"] = address
             if phone:
                 fields["phone"] = phone
             if hours:
@@ -292,12 +297,21 @@ class LogisticsSheet(Automation):
             comment = (obj.description or "").strip()
             if comment:
                 fields["comment"] = comment
-            return fields
+            return fields, note
+        existing = str(hit.get("address") or "").strip()
+        if not existing:
+            fields["address"] = address
+        elif existing != address.strip():
+            note = (
+                f"адрес в листе не совпал с заказом {obj.name} ({obj.id}): "
+                f"в листе «{existing}», в заказе «{address.strip()}». "
+                "Строку не дублирую, дату маршрута не меняю."
+            )
         if not record.get("phone_written") and not str(hit.get("phone") or "").strip() and phone:
             fields["phone"] = phone
         if not str(hit.get("hours") or "").strip() and hours:
             fields["hours"] = hours
-        return fields
+        return fields, note
 
     def _hours(self, obj: Entity) -> str:
         if not str(self.hours_field).strip():

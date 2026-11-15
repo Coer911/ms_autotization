@@ -386,13 +386,20 @@ async def test_manual_cells_survive_resync(fake, make_hub):
     assert out.status == "done" and "UPDATE_ORDER" in out.detail
     again = _only(hub)["rows"][order["id"]]
     assert again["counterparty"] == "ООО «Новое»"
-    assert again["address"] == "Тестовая улица, 9"
+    assert again["address"] == "Тестовая улица, 1"
     assert again["group"] == "7" and again["done"] == "да"
     assert again["hours"] == "вручную" and again["comment"] == "заметка логиста"
     assert again["phone"] == "+7 900 111-22-33"
     write = _only(hub)["writes"][-1]
     assert write["new"] is False
-    assert set(write["fields"]) <= {"order_id", "counterparty", "address"}
+    assert set(write["fields"]) <= {"order_id", "counterparty"}
+    assert "address" not in write["fields"]
+    stored = json.loads(await hub.storage.get(f"ls:order:{order['id']}"))
+    assert stored["route_date"] == ROUTE.isoformat()
+    notes = [item for item in hub.channels.sent if item["kind"] == "ADDRESS_DIFF"]
+    assert notes and "Тестовая улица, 1" in notes[-1]["detail"]
+    assert "Тестовая улица, 9" in notes[-1]["detail"]
+    assert list(_only(hub)["rows"]) == [order["id"]]
 
 
 async def test_empty_hours_can_be_filled_later_comment_cannot(fake, make_hub):
@@ -535,3 +542,51 @@ def test_route_date_is_not_the_saturday_after_the_transition():
     """Четверг 12.11 → пятница 13.11. Суббота 14.11 (день обработки) → понедельник 16.11."""
     assert route_date(parse_transition(TRANSITION)) == ROUTE == date(2026, 11, 13)
     assert route_date(parse_transition("2026-11-14 12:00:00.000")) == date(2026, 11, 16)
+
+
+async def test_broken_existing_file_is_not_replaced(fake, make_hub):
+    hub = await make_hub(_params())
+    order = _prepare(fake)
+    file_id = hub.channels.book.seed(file_title(ROUTE_TEXT), ROUTE_TEXT)
+    hub.channels.book.insert(file_id, "чужой", {
+        "counterparty": "Уже в листе", "address": "Улица, 5",
+    })
+    hub.channels.book.files[file_id]["block"] = (
+        f"файл {file_id} за {ROUTE_TEXT}: нет листа _hub. "
+        "Строки не очищаю, данные не переписываю, второй файл не создаю. "
+        "Нужно ручное восстановление или подтверждённая миграция."
+    )
+    await _see(hub, fake, order)
+    out = await _move(hub, fake, order)
+    assert out[0].status == "failed"
+    assert "нет листа _hub" in out[0].detail
+    assert "не очищаю" in out[0].detail and "второй файл не создаю" in out[0].detail
+    assert hub.channels.book.creates == 0
+    assert len(hub.channels.book.files) == 1
+    assert hub.channels.book.files[file_id]["rows"]["чужой"]["address"] == "Улица, 5"
+    stored = json.loads(await hub.storage.get(f"ls:order:{order['id']}"))
+    assert stored["route_date"] == ROUTE.isoformat()
+    assert stored["transition_at"] == TRANSITION
+
+
+async def test_empty_address_cell_is_filled_then_kept(fake, make_hub):
+    hub = await make_hub(_params())
+    order = _prepare(fake)
+    await _see(hub, fake, order)
+    assert (await _move(hub, fake, order))[0].status == "done"
+    row = _only(hub)["rows"][order["id"]]
+    row["address"] = ""
+    fresh = from_api("customerorder", order)
+    event = Event(entity="customerorder", entity_id=order["id"], action="UPDATE", source="webhook")
+    filled = await hub.engine.execute(hub.automations[0], fresh, event, mode="force")
+    assert filled.status == "done"
+    assert _only(hub)["rows"][order["id"]]["address"] == "Тестовая улица, 1"
+    order["shipmentAddress"] = "Другой адрес, 9"
+    changed = from_api("customerorder", order)
+    kept = await hub.engine.execute(hub.automations[0], changed, event, mode="force")
+    assert kept.status == "done"
+    assert _only(hub)["rows"][order["id"]]["address"] == "Тестовая улица, 1"
+    assert list(_only(hub)["rows"]) == [order["id"]]
+    stored = json.loads(await hub.storage.get(f"ls:order:{order['id']}"))
+    assert stored["route_date"] == ROUTE.isoformat()
+    assert any(item["kind"] == "ADDRESS_DIFF" for item in hub.channels.sent)

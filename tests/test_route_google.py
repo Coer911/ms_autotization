@@ -31,6 +31,8 @@ class GoogleFake:
         self.bad_headers = False
         self.drop_updated_range = False
         self.extra_same_name = False
+        self.meta_id = ""
+        self.hide_mark = False
 
     def transport(self):
         return httpx.MockTransport(self.handle)
@@ -52,7 +54,8 @@ class GoogleFake:
         if url.path.startswith("/drive/v3/files/") and request.method == "GET":
             file_id = url.path.rsplit("/", 1)[-1]
             item = self.files[file_id]
-            return httpx.Response(200, json={"id": file_id, "appProperties": item["app"]})
+            app = {} if self.hide_mark else item["app"]
+            return httpx.Response(200, json={"id": self.meta_id or file_id, "appProperties": app})
         if "/values/" in url.path and request.method == "GET":
             return self._read(url.path)
         if url.path.endswith(":batchUpdate") and "/values" not in url.path:
@@ -122,6 +125,11 @@ class GoogleFake:
             row = item["hub_cells"].get(cells)
             if row:
                 payload["values"] = [row]
+            return httpx.Response(200, json=payload)
+        if cells == "B3:B20":
+            rows = [item["cells"].get(f"B{n}") or [""] for n in range(3, 21)]
+            if any(str(row[0]).strip() for row in rows if row):
+                payload["values"] = rows
             return httpx.Response(200, json=payload)
         if cells == "A3:G3":
             letters = "ABCDEFG"
@@ -317,6 +325,142 @@ def test_service_account_is_optional_at_import():
         GoogleRouteSheet(http, raw_json="{")._mint()
     with pytest.raises(ChannelError, match="private_key"):
         GoogleRouteSheet(http, raw_json='{"client_email": "bot@example.com"}')._mint()
+
+
+def _sheet_posts(fake: GoogleFake) -> list[str]:
+    return [url for method, url, _body in fake.calls
+            if method == "POST" and "sheets.googleapis.com" in url]
+
+
+def _existing(fake: GoogleFake, *, app=None, sheets=None, cells=None, hub=None) -> str:
+    fake.files["old"] = {
+        "name": file_title(DAY),
+        "app": {"hub": "logistics_sheet", "route_date": DAY} if app is None else app,
+        "sheets": sheets if sheets is not None else [
+            {"sheetId": 4, "title": DAY},
+            {"sheetId": 99, "title": "_hub", "hidden": True},
+        ],
+        "cells": {"A2:G2": list(HEADER), "B3": ["ЖИВАЯ-СТРОКА"], **(cells or {})},
+        "hub": [["order_id", "row"], ["uuid-1", "3"]] if hub is None else hub,
+        "hub_cells": {},
+    }
+    return "old"
+
+
+async def _assert_untouched(fake: GoogleFake, client: GoogleRouteSheet, match: str):
+    with pytest.raises(ChannelError, match=match):
+        await client.prepare("old", DAY)
+    assert _sheet_posts(fake) == []
+    assert not any("/copy" in url for _method, url, _body in fake.calls)
+    assert fake.files["old"]["cells"]["B3"] == ["ЖИВАЯ-СТРОКА"]
+    await client.http.aclose()
+
+
+async def test_existing_file_without_hub_is_not_cleared():
+    fake = GoogleFake()
+    client = _client(fake)
+    _existing(fake, sheets=[{"sheetId": 4, "title": DAY}])
+    await _assert_untouched(fake, client, "нет листа _hub")
+
+
+async def test_existing_file_with_wrong_mark_is_not_cleared():
+    fake = GoogleFake()
+    client = _client(fake)
+    _existing(fake, app={"hub": "чужое", "route_date": DAY})
+    await _assert_untouched(fake, client, "служебная метка")
+
+
+async def test_existing_file_with_wrong_route_date_is_not_cleared():
+    fake = GoogleFake()
+    client = _client(fake)
+    _existing(fake, app={"hub": "logistics_sheet", "route_date": "01.01.2000"})
+    await _assert_untouched(fake, client, "служебная метка")
+
+
+async def test_damaged_index_is_not_cleared():
+    fake = GoogleFake()
+    client = _client(fake)
+    _existing(fake, hub=[["order_id", "row"], ["uuid-1", "нет"]])
+    await _assert_untouched(fake, client, "не число")
+
+
+async def test_duplicate_hidden_id_is_not_cleared():
+    fake = GoogleFake()
+    client = _client(fake)
+    _existing(fake, hub=[["order_id", "row"], ["uuid-1", "3"], ["uuid-1", "4"]])
+    await _assert_untouched(fake, client, "повторяется")
+
+
+async def test_rows_without_ids_are_not_cleared():
+    fake = GoogleFake()
+    client = _client(fake)
+    _existing(fake, hub=[["order_id", "row"]])
+    await _assert_untouched(fake, client, "нет id заказов")
+
+
+async def test_valid_existing_file_is_not_rewritten():
+    fake = GoogleFake()
+    client = _client(fake)
+    _existing(fake)
+    assert await client.prepare("old", DAY) == DAY
+    assert _sheet_posts(fake) == []
+    assert fake.files["old"]["cells"]["B3"] == ["ЖИВАЯ-СТРОКА"]
+    await client.http.aclose()
+
+
+async def test_new_copy_is_cleared_only_after_id_and_mark():
+    fake = GoogleFake()
+    fake.meta_id = "не-тот-id"
+    client = _client(fake)
+    with pytest.raises(ChannelError, match="не очищаю"):
+        await client.create_file(FOLDER, TEMPLATE, file_title(DAY), DAY)
+    assert _sheet_posts(fake) == []
+    assert fake.files["copy-1"]["cells"]["B3"] == ["СТРОКА-ШАБЛОНА"]
+    await client.http.aclose()
+
+    fake = GoogleFake()
+    fake.hide_mark = True
+    client = _client(fake)
+    with pytest.raises(ChannelError, match="не очищаю"):
+        await client.create_file(FOLDER, TEMPLATE, file_title(DAY), DAY)
+    assert _sheet_posts(fake) == []
+    assert fake.files["copy-1"]["cells"]["B3"] == ["СТРОКА-ШАБЛОНА"]
+    await client.http.aclose()
+
+
+async def test_hours_stay_text():
+    fake = GoogleFake()
+    client = _client(fake)
+    file_id = await client.create_file(FOLDER, TEMPLATE, file_title(DAY), DAY)
+    samples = ["10-14", "09:00-18:00", "10:00–14:00"]
+    for sample in samples:
+        await client.write_order(file_id, DAY, {
+            "order_id": f"id-{sample}",
+            "counterparty": "ООО «Ромашка»",
+            "address": "Тестовая, 1",
+            "hours": sample,
+        }, None)
+    value_bodies = [json.loads(raw) for _method, url, raw in fake.calls
+                    if raw and "values:batchUpdate" in url]
+    assert value_bodies
+    assert all(body["valueInputOption"] == "RAW" for body in value_bodies)
+    written = []
+    for body in value_bodies:
+        for block in body["data"]:
+            if "!E" in block["range"]:
+                written.append(block["values"][0][0])
+    assert written == samples
+    assert all(isinstance(value, str) for value in written)
+    formats = [json.loads(raw) for _method, url, raw in fake.calls if raw and b"repeatCell" in raw]
+    assert len(formats) == len(samples)
+    for body in formats:
+        cell = body["requests"][0]["repeatCell"]
+        assert cell["range"]["startColumnIndex"] == 4
+        assert cell["range"]["endColumnIndex"] == 5
+        assert cell["cell"]["userEnteredFormat"]["numberFormat"]["type"] == "TEXT"
+    blob = json.dumps(value_bodies + formats, ensure_ascii=False)
+    assert "USER_ENTERED" not in blob
+    await client.http.aclose()
 
 
 async def test_dry_run_channel_refuses_google_write():

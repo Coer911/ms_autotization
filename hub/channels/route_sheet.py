@@ -11,7 +11,10 @@
   данные с строки 3. A «Гр.м.» и G «Выполнено» не пишутся.
 Скрытый id заказа — лист `_hub`, колонки A–G из-за него не сдвигаются.
 Вкладки «Адреса», «Адреса скорая почта на 1 август» и «08.09.2025»
-в копию дневного файла не переносятся.
+удаляются только у копии, созданной в этом же вызове, после сверки id и метки.
+Чужой или уже существующий файл не очищается и не переписывается: нет `_hub`,
+битый индекс или другая служебная метка — это ошибка и ручное восстановление.
+Часы приёмки пишутся как текст (RAW и формат TEXT), без разбора в дату.
 
 Секрет — только GOOGLE_SERVICE_ACCOUNT_JSON. Без него модуль импортируется,
 а боевой вызов падает ChannelError (это повтор хаба, не падение процесса).
@@ -247,18 +250,84 @@ class GoogleRouteSheet:
         file_id = payload.get("id")
         if not file_id:
             raise ChannelError("Drive не подтвердил id копии")
-        await self.prepare(file_id, day)
+        await self._prepare_new_copy(file_id, day)
         return file_id
 
     async def prepare(self, file_id: str, day: str) -> str:
-        """Довести копию до одного дневного листа. Шаблон-источник не открывается на запись."""
-        meta = await self._request(
+        """Файл даты уже есть. Только чтение: строки не чистятся и не переписываются."""
+        reason = await self._existing_block(file_id, day)
+        if reason:
+            log.error("маршрут %s файл %s: %s", day, file_id, reason)
+            raise ChannelError(reason)
+        return day
+
+    async def _file_meta(self, file_id: str) -> dict:
+        return await self._request(
             "GET", f"{DRIVE}/files/{file_id}",
             params={"fields": "id,appProperties", "supportsAllDrives": "true"},
         )
-        if meta.get("id") != file_id:
-            raise ChannelError("Drive не подтвердил id файла")
-        ours = (meta.get("appProperties") or {}).get("hub") == HUB_MARK
+
+    async def _existing_block(self, file_id: str, day: str) -> str:
+        meta = await self._file_meta(file_id)
+        confirmed = meta.get("id")
+        if confirmed != file_id:
+            return (
+                f"файл {file_id} за {day}: Drive подтвердил id {confirmed!r}. "
+                "Строки не очищаю, данные не переписываю, второй файл не создаю. "
+                "Нужно ручное восстановление."
+            )
+        props = meta.get("appProperties") or {}
+        if props.get("hub") != HUB_MARK or props.get("route_date") != day:
+            return (
+                f"файл {file_id} за {day}: служебная метка не совпала "
+                f"(hub={props.get('hub')!r}, route_date={props.get('route_date')!r}, "
+                f"ожидались hub={HUB_MARK!r}, route_date={day!r}). "
+                "Строки не очищаю, данные не переписываю, второй файл не создаю. "
+                "Нужна ручная проверка или подтверждённая миграция."
+            )
+        try:
+            sheets = await self._sheet_props(file_id)
+        except ChannelError as e:
+            return self._damaged(file_id, day, str(e))
+        if not any(s["title"] == HUB_SHEET for s in sheets):
+            return self._damaged(file_id, day, f"нет листа {HUB_SHEET}")
+        if not any(s["title"] == day for s in sheets):
+            return self._damaged(file_id, day, f"нет вкладки «{day}»")
+        try:
+            header = await self._row(file_id, a1(day, "A2:G2"))
+            if not headers_match(header):
+                return self._damaged(file_id, day, "шапка не совпала со структурой 06.03.2026")
+            index = await self._index(file_id)
+            if not index:
+                preview = await self._column(file_id, a1(day, "B3:B20"))
+                if any(cell.strip() for cell in preview):
+                    return self._damaged(
+                        file_id, day, f"на листе есть строки, а в {HUB_SHEET} нет id заказов")
+        except ChannelError as e:
+            return self._damaged(file_id, day, str(e))
+        return ""
+
+    @staticmethod
+    def _damaged(file_id: str, day: str, why: str) -> str:
+        return (
+            f"файл {file_id} за {day}: {why}. "
+            "Строки не очищаю, данные не переписываю, второй файл не создаю. "
+            "Нужно ручное восстановление или подтверждённая миграция."
+        )
+
+    async def _prepare_new_copy(self, file_id: str, day: str) -> None:
+        """Очистка только копии из этого вызова, после сверки id и служебной метки."""
+        meta = await self._file_meta(file_id)
+        props = meta.get("appProperties") or {}
+        if (meta.get("id") != file_id or props.get("hub") != HUB_MARK
+                or props.get("route_date") != day):
+            reason = (
+                f"копия {file_id} за {day}: id {meta.get('id')!r}, "
+                f"hub={props.get('hub')!r}, route_date={props.get('route_date')!r}. "
+                "Строки не очищаю, данные не переписываю, второй файл не создаю."
+            )
+            log.error("маршрут %s", reason)
+            raise ChannelError(reason)
         sheets = await self._sheet_props(file_id)
         candidates = [s for s in sheets if s["title"] not in EXCLUDED_SHEETS and s["title"] != HUB_SHEET]
         chosen = next((s for s in candidates if s["title"] == day), None)
@@ -268,7 +337,9 @@ class GoogleRouteSheet:
             chosen = candidates[0]
         header = await self._row(file_id, a1(chosen["title"], "A2:G2"))
         if not headers_match(header):
-            raise ChannelError("шапка дневного листа не совпала со структурой 06.03.2026")
+            raise ChannelError(
+                "шапка дневного листа не совпала со структурой 06.03.2026. "
+                "Строки не очищаю, данные не переписываю.")
         requests = []
         for sheet in sheets:
             if sheet["title"] in EXCLUDED_SHEETS:
@@ -282,16 +353,9 @@ class GoogleRouteSheet:
             requests.append({"addSheet": {"properties": {"title": HUB_SHEET, "hidden": True}}})
         if requests:
             await self._structure(file_id, requests)
-        index = await self._index(file_id)
-        if ours and not index:
-            await self._clear(file_id, a1(day, "A3:G500"))
-        elif not ours and not index:
-            preview = await self._row(file_id, a1(day, "B3:B20"))
-            if any(cell.strip() for cell in preview):
-                raise ChannelError("в файле есть строки без id заказа")
+        await self._clear(file_id, a1(day, "A3:G500"))
         await self._put_date(file_id, day)
         await self._hub_header(file_id)
-        return day
 
     async def find_order(self, file_id: str, day: str, order_id: str) -> dict | None:
         index = await self._index(file_id)
@@ -325,9 +389,36 @@ class GoogleRouteSheet:
                 raise ChannelError("нет скрытой строки заказа")
             visible = row
             hub_row = index[order_id][1]
+        hours = fields.get("hours")
+        if hours is not None and str(hours).strip():
+            # Сначала TEXT, потом RAW: иначе «10-14» и «09:00-18:00» становятся датой.
+            sheet_id = await self._daily_sheet_id(file_id, day)
+            await self._text_hours(file_id, sheet_id, visible)
         data = value_ranges(day, visible, fields, hub_row)
         await self._values(file_id, data)
         return visible
+
+    async def _daily_sheet_id(self, file_id: str, day: str) -> int:
+        sheets = await self._sheet_props(file_id)
+        found = next((s for s in sheets if s["title"] == day), None)
+        if found is None:
+            raise ChannelError(f"нет вкладки «{day}», часы не записываю")
+        return found["sheetId"]
+
+    async def _text_hours(self, file_id: str, sheet_id: int, row: int) -> None:
+        await self._structure(file_id, [{
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": row - 1,
+                    "endRowIndex": row,
+                    "startColumnIndex": 4,
+                    "endColumnIndex": 5,
+                },
+                "cell": {"userEnteredFormat": {"numberFormat": {"type": "TEXT"}}},
+                "fields": "userEnteredFormat.numberFormat",
+            },
+        }])
 
     async def _sheet_props(self, file_id: str) -> list[dict]:
         payload = await self._request(
@@ -381,7 +472,7 @@ class GoogleRouteSheet:
     async def _values(self, file_id: str, data: list[dict]) -> None:
         payload = await self._request(
             "POST", f"{SHEETS}/{file_id}/values:batchUpdate",
-            body={"valueInputOption": "USER_ENTERED", "data": data},
+            body={"valueInputOption": "RAW", "data": data},
         )
         if payload.get("spreadsheetId") != file_id:
             raise ChannelError("Sheets не подтвердил spreadsheetId")
@@ -401,6 +492,17 @@ class GoogleRouteSheet:
             return []
         return ["" if cell is None else str(cell) for cell in values[0]]
 
+    async def _column(self, file_id: str, range_: str) -> list[str]:
+        encoded = quote(range_, safe="")
+        payload = await self._request("GET", f"{SHEETS}/{file_id}/values/{encoded}")
+        if "range" not in payload:
+            raise ChannelError("Sheets не подтвердил range")
+        out: list[str] = []
+        for row in payload.get("values") or []:
+            for cell in row:
+                out.append("" if cell is None else str(cell))
+        return out
+
     async def _index(self, file_id: str) -> dict[str, tuple[int, int]]:
         encoded = quote(a1(HUB_SHEET, "A:B"), safe="")
         payload = await self._request("GET", f"{SHEETS}/{file_id}/values/{encoded}")
@@ -413,9 +515,17 @@ class GoogleRouteSheet:
             order_id = str(raw[0]).strip()
             if not order_id or order_id == "order_id":
                 continue
-            visible = int(raw[1]) if len(raw) > 1 and str(raw[1]).strip() else 0
+            text = str(raw[1]).strip() if len(raw) > 1 else ""
+            if not text:
+                raise ChannelError("скрытый индекс без номера строки")
+            try:
+                visible = int(text)
+            except (TypeError, ValueError) as e:
+                raise ChannelError("скрытый индекс: номер строки не число") from e
             if visible < DATA_START_ROW:
                 raise ChannelError("скрытый индекс без номера строки")
+            if order_id in out:
+                raise ChannelError(f"скрытый индекс: id {order_id} повторяется")
             out[order_id] = (visible, offset)
         return out
 

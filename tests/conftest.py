@@ -55,6 +55,8 @@ class RouteBook:
 
     def prepare(self, file_id: str, day: str) -> str:
         item = self.files[file_id]
+        if item.get("block"):
+            raise ChannelError(item["block"])
         item["tab"] = day
         item["date_cell"] = f"дата доставки: {day}"
         item["sheets"] = [day]
