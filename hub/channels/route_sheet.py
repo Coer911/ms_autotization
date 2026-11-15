@@ -298,11 +298,9 @@ class GoogleRouteSheet:
             if not headers_match(header):
                 return self._damaged(file_id, day, "шапка не совпала со структурой 06.03.2026")
             index = await self._index(file_id)
-            if not index:
-                preview = await self._column(file_id, a1(day, "B3:B20"))
-                if any(cell.strip() for cell in preview):
-                    return self._damaged(
-                        file_id, day, f"на листе есть строки, а в {HUB_SHEET} нет id заказов")
+            orphan = await self._rows_without_id(file_id, day, index)
+            if orphan:
+                return self._damaged(file_id, day, _orphan_reason(orphan))
         except ChannelError as e:
             return self._damaged(file_id, day, str(e))
         return ""
@@ -378,6 +376,11 @@ class GoogleRouteSheet:
 
     async def write_order(self, file_id: str, day: str, fields: dict, row: int | None) -> int:
         index = await self._index(file_id)
+        orphan = await self._rows_without_id(file_id, day, index)
+        if orphan:
+            reason = self._damaged(file_id, day, _orphan_reason(orphan))
+            log.error("маршрут %s файл %s: %s", day, file_id, reason)
+            raise ChannelError(reason)
         order_id = fields.get("order_id", "")
         if row is None:
             if order_id in index:
@@ -432,7 +435,12 @@ class GoogleRouteSheet:
             props = sheet.get("properties") or {}
             if "sheetId" not in props or "title" not in props:
                 raise ChannelError("Sheets вернул вкладку без id")
-            out.append({"sheetId": props["sheetId"], "title": props["title"]})
+            grid = props.get("gridProperties") or {}
+            out.append({
+                "sheetId": props["sheetId"],
+                "title": props["title"],
+                "rowCount": int(grid.get("rowCount") or 1000),
+            })
         return out
 
     async def _structure(self, file_id: str, requests: list[dict]) -> None:
@@ -492,16 +500,39 @@ class GoogleRouteSheet:
             return []
         return ["" if cell is None else str(cell) for cell in values[0]]
 
-    async def _column(self, file_id: str, range_: str) -> list[str]:
+    async def _grid(self, file_id: str, range_: str) -> list[list[str]]:
         encoded = quote(range_, safe="")
         payload = await self._request("GET", f"{SHEETS}/{file_id}/values/{encoded}")
         if "range" not in payload:
             raise ChannelError("Sheets не подтвердил range")
-        out: list[str] = []
-        for row in payload.get("values") or []:
-            for cell in row:
-                out.append("" if cell is None else str(cell))
-        return out
+        return [
+            ["" if cell is None else str(cell) for cell in row]
+            for row in (payload.get("values") or [])
+        ]
+
+    async def _rows_without_id(self, file_id: str, day: str, index: dict) -> list[int]:
+        """Номера непустых строк A–G с 3-й, которых нет в `_hub`. Пустой B3:B20 их не прячет."""
+        sheets = await self._sheet_props(file_id)
+        daily = next((s for s in sheets if s["title"] == day), None)
+        if daily is None:
+            raise ChannelError(f"нет вкладки «{day}»")
+        last = int(daily.get("rowCount") or 1000)
+        if last < DATA_START_ROW:
+            return []
+        known = {visible for visible, _hub_row in index.values()}
+        found: list[int] = []
+        start = DATA_START_ROW
+        while start <= last:
+            end = min(last, start + 499)
+            grid = await self._grid(file_id, a1(day, f"A{start}:G{end}"))
+            for offset, cells in enumerate(grid):
+                number = start + offset
+                if number in known or number > last:
+                    continue
+                if any(cell.strip() for cell in cells):
+                    found.append(number)
+            start = end + 1
+        return found
 
     async def _index(self, file_id: str) -> dict[str, tuple[int, int]]:
         encoded = quote(a1(HUB_SHEET, "A:B"), safe="")
@@ -528,6 +559,12 @@ class GoogleRouteSheet:
                 raise ChannelError(f"скрытый индекс: id {order_id} повторяется")
             out[order_id] = (visible, offset)
         return out
+
+
+def _orphan_reason(rows: list[int]) -> str:
+    shown = ", ".join(str(number) for number in rows[:30])
+    tail = f" и ещё {len(rows) - 30}" if len(rows) > 30 else ""
+    return f"строки без id заказа: {shown}{tail}"
 
 
 def _escape(value: str) -> str:

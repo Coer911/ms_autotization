@@ -1,5 +1,6 @@
 """Адаптер Google: подтверждение ответа, шаблон, без живых адресов и без сети."""
 import json
+import re
 from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
@@ -67,7 +68,11 @@ class GoogleFake:
         if url.path.startswith("/v4/spreadsheets/") and request.method == "GET":
             file_id = url.path.split("/")[3]
             return httpx.Response(200, json={"sheets": [
-                {"properties": {"sheetId": s["sheetId"], "title": s["title"]}}
+                {"properties": {
+                    "sheetId": s["sheetId"],
+                    "title": s["title"],
+                    "gridProperties": {"rowCount": s.get("rowCount", 1000)},
+                }}
                 for s in self.files[file_id]["sheets"]
             ]})
         return httpx.Response(404, json={"error": {"message": url.path}})
@@ -126,20 +131,26 @@ class GoogleFake:
             if row:
                 payload["values"] = [row]
             return httpx.Response(200, json=payload)
-        if cells == "B3:B20":
-            rows = [item["cells"].get(f"B{n}") or [""] for n in range(3, 21)]
-            if any(str(row[0]).strip() for row in rows if row):
-                payload["values"] = rows
+        if cells in item["cells"]:
+            payload["values"] = [item["cells"][cells]]
             return httpx.Response(200, json=payload)
-        if cells == "A3:G3":
+        grid = re.fullmatch(r"([A-G])(\d+):([A-G])(\d+)", cells)
+        if grid:
+            start_col, start_row, end_col, end_row = grid.groups()
             letters = "ABCDEFG"
-            rownum = "3"
-            assembled = []
-            for letter in letters:
-                cell = item["cells"].get(f"{letter}{rownum}")
-                assembled.append(cell[0] if cell else "")
-            if any(assembled):
-                payload["values"] = [assembled]
+            cols = letters[letters.index(start_col):letters.index(end_col) + 1]
+            rows = []
+            last = 0
+            for n in range(int(start_row), int(end_row) + 1):
+                assembled = []
+                for letter in cols:
+                    cell = item["cells"].get(f"{letter}{n}")
+                    assembled.append(cell[0] if cell else "")
+                rows.append(assembled)
+                if any(str(value).strip() for value in assembled):
+                    last = len(rows)
+            if last:
+                payload["values"] = rows[:last]
             return httpx.Response(200, json=payload)
         row = item["cells"].get(cells)
         if row:
@@ -395,7 +406,54 @@ async def test_rows_without_ids_are_not_cleared():
     fake = GoogleFake()
     client = _client(fake)
     _existing(fake, hub=[["order_id", "row"]])
-    await _assert_untouched(fake, client, "нет id заказов")
+    await _assert_untouched(fake, client, "строки без id")
+
+
+async def test_orphan_outside_b3_b20_blocks_write():
+    """Пустой индекс: текст в E3 и C21, B3:B20 пустые. Строка 3 не затирается."""
+    fake = GoogleFake()
+    client = _client(fake)
+    _existing(fake, hub=[["order_id", "row"]], cells={
+        "B3": [""], "E3": ["10-14"], "C21": ["адрес без id"],
+    })
+    with pytest.raises(ChannelError, match="строки без id"):
+        await client.prepare("old", DAY)
+    with pytest.raises(ChannelError, match="3, 21"):
+        await client.write_order("old", DAY, {
+            "order_id": "новый",
+            "counterparty": "ООО «Ромашка»",
+            "address": "Тестовая, 1",
+            "hours": "09:00-18:00",
+        }, None)
+    assert not any("values:batchUpdate" in url or "batchClear" in url or "/copy" in url
+                   for _method, url, _body in fake.calls)
+    assert fake.files["old"]["cells"]["E3"] == ["10-14"]
+    assert fake.files["old"]["cells"]["C21"] == ["адрес без id"]
+    await client.http.aclose()
+
+
+async def test_orphan_next_to_indexed_row_blocks_write():
+    """В `_hub` уже есть id. Следующая строка без id не становится местом нового заказа."""
+    fake = GoogleFake()
+    client = _client(fake)
+    _existing(fake, hub=[["order_id", "row"], ["uuid-1", "3"]], cells={
+        "B3": ["Уже в индексе"], "E4": ["часы без id"],
+    })
+    with pytest.raises(ChannelError, match="строки без id"):
+        await client.prepare("old", DAY)
+    with pytest.raises(ChannelError, match="строки без id заказа: 4") as caught:
+        await client.write_order("old", DAY, {
+            "order_id": "новый",
+            "counterparty": "ООО «Ромашка»",
+            "address": "Тестовая, 1",
+        }, None)
+    assert "не переписываю" in str(caught.value)
+    assert "второй файл не создаю" in str(caught.value)
+    assert not any("values:batchUpdate" in url or "batchClear" in url or "/copy" in url
+                   for _method, url, _body in fake.calls)
+    assert fake.files["old"]["cells"]["E4"] == ["часы без id"]
+    assert fake.files["old"]["cells"]["B3"] == ["Уже в индексе"]
+    await client.http.aclose()
 
 
 async def test_valid_existing_file_is_not_rewritten():
