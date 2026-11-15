@@ -116,6 +116,7 @@ class Engine:
             if existing and existing.status == "failed":
                 detail = f"повтор после {existing.next_at}"
             return Outcome(a.name, obj.label, "already", detail)
+        self.ctx.event = event
         return await self._run(a, key, obj.label, lambda: a.run(obj, self.ctx))
 
     async def _run(self, a: Automation, key: str, label: str, work) -> Outcome:

@@ -7,6 +7,16 @@ from hub.events import Event
 from hub.storage import EVENT_MAX_ATTEMPTS
 
 
+async def test_webhook_moment_survives_the_queue():
+    s = await fresh_storage()
+    try:
+        await s.enqueue(Event("customerorder", "o1", "UPDATE", moment="2026-11-12 18:00:00"), "r")
+        claimed = await s.claim(1, "w", 60)
+        assert claimed[0].event.moment == "2026-11-12 18:00:00"
+    finally:
+        await s.close()
+
+
 async def test_claim_is_exclusive_and_lease_expires():
     s = await fresh_storage()
     try:

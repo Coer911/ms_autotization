@@ -1,39 +1,39 @@
-"""Маршрутный лист: переход заказа в статус сборки → строка в файле следующего рабочего дня.
+"""Маршрутный лист: сбор перехода и утренний неизменяемый XLSX на Диске.
 
-Время перехода вебхук в хаб не приносит (`parse_webhook` не хранит auditContext,
-в очереди нет колонки момента смены статуса). Берём `customerorder.updated` —
-единственную метку документа, которую воркер уже получает. Это момент последнего
-обновления заказа в поясе Москвы, не `received_at` и не часы обработки.
-Первый боевой вход записывает эту метку и дату в kv. Повтор, retry и
-восстановление дату заново не считают.
+Вебхук только проверяет переход и пишет заказ в базу хаба. В Диск на этом шаге
+ничего не уходит. Дата маршрута — следующий пн–пт по Москве от auditContext.moment.
+customerorder.updated датой перехода не считается. Нет момента — ручная проверка,
+дату не угадываем.
 
-Снимок хаба хранит имя статуса, не id. «Из другого статуса» проверяется по имени
-в `previous_state`. Id, если он есть у загруженного заказа и задан `state_id`,
-решает, целевой ли текущий статус; иначе сравнивается имя.
+В `at` (по умолчанию 07:00) планировщик собирает заказы этой даты в новый XLSX
+и загружает его в папку. Уже лежащий файл не перезаписывается и не удаляется.
+Поздний заказ на опубликованную дату остаётся в базе со статусом LATE_ORDER.
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import logging
-import re
 from datetime import date, datetime, timedelta
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from ..channels.route_sheet import file_title
+from ..channels.yandex_disk import DiskError
 from ..entities import Entity
 from ..events import Event
 from ..moysklad import entity_id
 from . import Automation, ConfigError, Context, Skip, register
+from .route_xlsx import build_route_xlsx
 
 log = logging.getLogger("hub.automation.logistics")
 MSK = ZoneInfo("Europe/Moscow")
-FILE_LOCK = "_route_file"
 CANCELLED = frozenset({"отменён", "отменен", "отмена"})
-_OFFSET = re.compile(r"(?:Z|[+-]\d\d:?\d\d)$")
+DASH = "\u2014"
 
 
 class RouteReport(Exception):
-    """Нет адреса доставки: в журнал и в повтор. Адрес не выдумывается."""
+    """Нет адреса доставки: дата уже заморожена, строка в лист ещё не попала."""
 
 
 def _norm(value: str | None) -> str:
@@ -45,7 +45,7 @@ def parse_transition(value: str) -> datetime:
     text = (value or "").strip()
     if not text:
         raise ValueError("пустой момент перехода")
-    if "T" in text or _OFFSET.search(text):
+    if "T" in text or text.endswith("Z") or _has_offset(text):
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
         if parsed.tzinfo is None:
             parsed = parsed.replace(tzinfo=MSK)
@@ -55,7 +55,11 @@ def parse_transition(value: str) -> datetime:
             return datetime.strptime(text, fmt).replace(tzinfo=MSK)
         except ValueError:
             continue
-    raise ValueError(f"не разобран момент перехода: {text[:32]}")
+    raise ValueError("не разобран момент перехода")
+
+
+def _has_offset(text: str) -> bool:
+    return len(text) > 19 and text[-6] in "+-" and text[-3] == ":"
 
 
 def route_date(moment: datetime) -> date:
@@ -69,6 +73,17 @@ def route_date(moment: datetime) -> date:
 
 def day_text(day: date) -> str:
     return day.strftime("%d.%m.%Y")
+
+
+def file_name(day: date) -> str:
+    return f"Маршрутный лист {DASH} {day_text(day)}.xlsx"
+
+
+def file_path(folder: str, day: date) -> str:
+    base = str(folder).strip().rstrip("/")
+    if not base.startswith("disk:"):
+        base = "disk:" + (base if base.startswith("/") else f"/{base}")
+    return f"{base}/{file_name(day)}"
 
 
 def delivery_address(obj: Entity) -> str:
@@ -107,16 +122,91 @@ def _order_key(order_id: str) -> str:
     return f"ls:order:{order_id}"
 
 
-def _file_key(day: date) -> str:
-    return f"ls:file:{day.isoformat()}"
+def _day_key(day: date) -> str:
+    return f"ls:day:{day.isoformat()}"
 
 
-def _load(raw: str | None) -> dict | None:
-    if not raw:
+def _xlsx_key(day: date) -> str:
+    return f"ls:xlsx:{day.isoformat()}"
+
+
+def _empty_day() -> dict:
+    return {
+        "status": "open", "orders": {}, "late": [], "frozen_ids": [],
+        "publication_id": "", "file": None,
+    }
+
+
+def _load_day(raw: str | None) -> dict:
+    return json.loads(raw) if raw else _empty_day()
+
+
+def _dump(doc: dict) -> str:
+    return json.dumps(doc, ensure_ascii=False)
+
+
+def _pointer(raw: str | None) -> dict | None:
+    return json.loads(raw) if raw else None
+
+
+def _freeze(raw: str | None) -> str:
+    doc = _load_day(raw)
+    if doc["status"] == "open":
+        missed = [oid for oid, order in doc["orders"].items()
+                  if not str(order.get("address") or "").strip()]
+        for oid in missed:
+            doc["orders"].pop(oid, None)
+            if oid not in doc["late"]:
+                doc["late"].append(oid)
+        ready = list(doc["orders"].values())
+        ready.sort(key=lambda order: (order.get("transition_at") or "", order["id"]))
+        doc["frozen_ids"] = [order["id"] for order in ready]
+        doc["publication_id"] = doc.get("publication_id") or str(uuid4())
+        doc["status"] = "publishing" if doc["frozen_ids"] else "published"
+    return _dump(doc)
+
+
+def _upsert(raw: str | None, order: dict) -> str:
+    doc = _load_day(raw)
+    oid = order["id"]
+    if doc["status"] != "open":
+        if oid not in doc.get("frozen_ids", []) and oid not in doc["late"]:
+            doc["late"].append(oid)
+        return _dump(doc)
+    doc["orders"][oid] = order
+    return _dump(doc)
+
+
+def _save_file(raw: str | None, file: dict) -> str:
+    doc = _load_day(raw)
+    current = doc.get("file")
+    if current:
+        if current.get("md5") != file["md5"]:
+            raise DiskError(409, "контрольная сумма публикации уже другая, не перезаписываю")
+        return _dump(doc)
+    doc["file"] = file
+    doc["status"] = "published"
+    return _dump(doc)
+
+
+def _parsed_moment(moment: str) -> datetime | None:
+    if not moment:
         return None
-    data = json.loads(raw)
-    date.fromisoformat(data["route_date"])
-    return data
+    try:
+        return parse_transition(moment)
+    except ValueError:
+        return None
+
+
+async def _write_pointer(ctx: Context, order_id: str, status: str,
+                         day: date | None, moment: str | None) -> None:
+    if ctx.settings.dry_run:
+        return
+    await ctx.storage.set(_order_key(order_id), json.dumps({
+        "status": status,
+        "route_date": day.isoformat() if day else None,
+        "transition_at": moment,
+    }, ensure_ascii=False))
 
 
 @register
@@ -128,19 +218,16 @@ class LogisticsSheet(Automation):
         "entity": "customerorder",
         "state": "ПОДТВЕРЖДЕН / ОЖИДАЕТ СБОРКИ",
         "state_id": "",
-        "folder_id": "",
-        "template_file_id": "",
         "hours_field": "",
         "phone_field": "",
+        "notify_chats": [],
     }
 
     def validate(self) -> None:
         if not str(self.state).strip():
             raise ConfigError(f"{self.name}: нужен state")
-        if not str(self.folder_id).strip():
-            raise ConfigError(f"{self.name}: нужен folder_id")
-        if not str(self.template_file_id).strip():
-            raise ConfigError(f"{self.name}: нужен template_file_id")
+        if not isinstance(self.notify_chats, list):
+            raise ConfigError(f"{self.name}: notify_chats — список")
 
     def _target(self, obj: Entity) -> bool:
         current = state_id_of(obj)
@@ -155,8 +242,6 @@ class LogisticsSheet(Automation):
         return state.get("stateType") == "Unsuccessful"
 
     def wants(self, obj: Entity, event: Event) -> bool:
-        # state_changed() истинен и на первом снимке, если вебхук прислал updatedFields=state.
-        # Для маршрута это не переход и не backfill.
         if event.action == "DELETE" or event.is_new or event.previous_state is None:
             return False
         if _norm(event.previous_state) == _norm(obj.state):
@@ -171,147 +256,86 @@ class LogisticsSheet(Automation):
     async def run(self, obj: Entity, ctx: Context) -> str:
         if self._cancelled(obj):
             raise Skip(f"отменённый заказ {obj.name}")
-        raw = await ctx.storage.get(_order_key(obj.id))
-        record = _load(raw)
+        event: Event | None = getattr(ctx, "event", None)
+        seen_moment = str(getattr(event, "moment", None) or "").strip()
+        record = _pointer(await ctx.storage.get(_order_key(obj.id)))
         if record is None:
-            if not self._target(obj):
-                raise Skip(f"статус уже не целевой: {obj.state}")
-            record = {
-                "transition_at": obj.updated,
-                "route_date": route_date(parse_transition(obj.updated)).isoformat(),
-                "file_id": "",
-                "phone_written": False,
-            }
+            moment = seen_moment
+            parsed = _parsed_moment(moment)
+            if parsed is None:
+                text = (f"MANUAL_REVIEW: нет времени перехода, заказ {obj.name} ({obj.id}). "
+                        "Дату не назначаю.")
+                if not ctx.settings.dry_run:
+                    await _write_pointer(ctx, obj.id, "manual", None, None)
+                    await ctx.channels.route_note("MANUAL_REVIEW", order=obj.name, order_id=obj.id)
+                log.info("ручная проверка %s %s", obj.name, obj.id)
+                return text
+            day = route_date(parsed)
+            record = {"status": "pending", "route_date": day.isoformat(), "transition_at": moment}
             if not ctx.settings.dry_run:
-                await ctx.storage.set(_order_key(obj.id), json.dumps(record, ensure_ascii=False))
+                await _write_pointer(ctx, obj.id, "pending", day, moment)
+        elif record.get("status") == "manual":
+            return f"MANUAL_REVIEW: заказ {obj.name} ({obj.id}) уже на ручной проверке"
+        if record.get("status") == "published":
+            return f"уже в листе {obj.name}"
+        if record.get("status") == "late":
+            return await self._late_notice(ctx, obj, date.fromisoformat(record["route_date"]))
         day = date.fromisoformat(record["route_date"])
+        if ctx.settings.dry_run:
+            doc = _load_day(await ctx.storage.get(_day_key(day)))
+            if doc["status"] != "open":
+                return f"WOULD_LATE {obj.name} ({obj.id}) {day_text(day)}"
+            return f"WOULD_COLLECT {obj.name} ({obj.id}) {day_text(day)}"
+        doc = _load_day(await ctx.storage.get(_day_key(day)))
+        if doc["status"] != "open":
+            if obj.id in doc.get("frozen_ids", []):
+                await _write_pointer(ctx, obj.id, "published", day, record.get("transition_at"))
+                return f"уже в листе {obj.name}"
+            await _write_pointer(ctx, obj.id, "late", day, record.get("transition_at"))
+            return await self._late_notice(ctx, obj, day)
         address = delivery_address(obj)
         if not address:
-            message = f"отчёт: нет адреса доставки, заказ {obj.name} ({obj.id})"
+            message = f"нет адреса доставки, заказ {obj.name} ({obj.id})"
             log.warning("%s", message)
             raise RouteReport(message)
-        if ctx.settings.dry_run:
-            return await self._dry(ctx, obj, record, day, raw is not None)
-        if not self._target(obj):
-            return await self._left_status(ctx, obj, record, day)
-        phone = await self._phone(obj, ctx)
-        hours = self._hours(obj)
-        file_id, created = await self._ensure_file(ctx, day, record)
-        hit = await ctx.channels.route_find_order(file_id, day_text(day), obj.id)
-        fields, address_note = self._fields(obj, address, phone, hours, hit, record)
-        if hit:
-            await ctx.channels.route_write_order(file_id, day_text(day), fields, hit["row"])
-            action = "UPDATE_ORDER"
-        else:
-            await ctx.channels.route_write_order(file_id, day_text(day), fields, None)
-            action = "ADD_ORDER"
-        record["file_id"] = file_id
-        record["phone_written"] = True
-        await ctx.storage.set(_order_key(obj.id), json.dumps(record, ensure_ascii=False))
-        if address_note:
-            log.warning("%s", address_note)
-            await ctx.channels.route_note(
-                "ADDRESS_DIFF", order_id=obj.id, route=record["route_date"], detail=address_note)
-        actions = (["CREATE_ROUTE"] if created else []) + [action]
-        for name in actions:
-            await ctx.channels.route_note(name, order_id=obj.id, route=record["route_date"])
-        return " ".join(actions + ([address_note] if address_note else []))
-
-    async def _dry(self, ctx: Context, obj: Entity, record: dict, day: date, had_record: bool) -> str:
-        file_raw = await ctx.storage.get(_file_key(day))
-        actions = []
-        if not file_raw:
-            actions.append("WOULD_CREATE_ROUTE")
-        actions.append("WOULD_UPDATE_ORDER" if had_record else "WOULD_ADD_ORDER")
-        for name in actions:
-            await ctx.channels.route_note(name, order_id=obj.id, route=day.isoformat())
-        return " ".join(actions)
-
-    async def _left_status(self, ctx: Context, obj: Entity, record: dict, day: date) -> str:
-        file_raw = _load_file(await ctx.storage.get(_file_key(day)))
-        file_id = record.get("file_id") or (file_raw or {}).get("id") or ""
-        if not file_id:
-            raise Skip(f"статус уже не целевой: {obj.state}")
-        hit = await ctx.channels.route_find_order(file_id, day_text(day), obj.id)
-        if hit is None:
-            raise Skip(f"статус уже не целевой: {obj.state}")
-        record["file_id"] = file_id
-        await ctx.storage.set(_order_key(obj.id), json.dumps(record, ensure_ascii=False))
-        return "строка сохранена, статус уже не целевой"
-
-    async def _ensure_file(self, ctx: Context, day: date, record: dict) -> tuple[str, bool]:
-        key = _file_key(day)
-        saved = _load_file(await ctx.storage.get(key))
-        if saved and saved.get("ready") and saved.get("id"):
-            record["file_id"] = saved["id"]
-            return saved["id"], False
-        lock = f"file:{day.isoformat()}"
-        title = file_title(day_text(day))
-        tab = day_text(day)
-        started, existing = await ctx.storage.try_start(
-            FILE_LOCK, lock, entity="route", entity_id=day.isoformat(),
-            label=title, lease=ctx.settings.lease_seconds)
-        if not started:
-            if existing and existing.status == "done":
-                saved = _load_file(await ctx.storage.get(key))
-                if saved and saved.get("id"):
-                    return saved["id"], False
-                found = await ctx.channels.route_find_file(self.folder_id, title)
-                if found:
-                    await ctx.storage.set(key, json.dumps(
-                        {"id": found, "title": title, "ready": True}, ensure_ascii=False))
-                    return found, False
-            raise ChannelBusy("файл даты занят другим запуском")
-        created = False
-        try:
-            found = await ctx.channels.route_find_file(self.folder_id, title)
-            if found is None:
-                found = await ctx.channels.route_create_file(
-                    self.folder_id, self.template_file_id, title, tab)
-                created = True
-            else:
-                await ctx.channels.route_prepare(found, tab)
-            if not found:
-                raise ChannelBusy("Google не подтвердил id файла")
-            await ctx.storage.set(key, json.dumps(
-                {"id": found, "title": title, "ready": True}, ensure_ascii=False))
-            await ctx.storage.finish(FILE_LOCK, lock, "done", found)
-            return found, created
-        except Exception as e:
-            await ctx.storage.fail(FILE_LOCK, lock, f"{type(e).__name__}: {e}")
-            raise
-
-    def _fields(self, obj: Entity, address: str, phone: str, hours: str,
-                hit: dict | None, record: dict) -> tuple[dict, str]:
-        fields: dict = {
-            "order_id": obj.id,
+        order = {
+            "id": obj.id,
+            "name": obj.name,
             "counterparty": obj.agent.name,
+            "address": address,
+            "phone": await self._phone(obj, ctx),
+            "hours": self._hours(obj),
+            "comment": (obj.description or "").strip(),
+            "transition_at": record.get("transition_at") or "",
+            "route_date": day.isoformat(),
         }
-        note = ""
-        if hit is None:
-            fields["address"] = address
-            if phone:
-                fields["phone"] = phone
-            if hours:
-                fields["hours"] = hours
-            comment = (obj.description or "").strip()
-            if comment:
-                fields["comment"] = comment
-            return fields, note
-        existing = str(hit.get("address") or "").strip()
-        if not existing:
-            fields["address"] = address
-        elif existing != address.strip():
-            note = (
-                f"адрес в листе не совпал с заказом {obj.name} ({obj.id}): "
-                f"в листе «{existing}», в заказе «{address.strip()}». "
-                "Строку не дублирую, дату маршрута не меняю."
-            )
-        if not record.get("phone_written") and not str(hit.get("phone") or "").strip() and phone:
-            fields["phone"] = phone
-        if not str(hit.get("hours") or "").strip() and hours:
-            fields["hours"] = hours
-        return fields, note
+        saved = _load_day(await ctx.storage.json_update(
+            _day_key(day), lambda raw, item=order: _upsert(raw, item)))
+        if obj.id in saved.get("late", []):
+            await _write_pointer(ctx, obj.id, "late", day, record.get("transition_at"))
+            return await self._late_notice(ctx, obj, day)
+        await _write_pointer(ctx, obj.id, "collected", day, record.get("transition_at"))
+        await ctx.channels.route_note(
+            "COLLECT", order=obj.name, order_id=obj.id, route_date=day.isoformat())
+        log.info("собран %s %s на %s", obj.name, obj.id, day.isoformat())
+        return f"COLLECT {obj.name} ({obj.id}) {day_text(day)}"
+
+    async def _late_notice(self, ctx: Context, obj: Entity, day: date) -> str:
+        text = (f"LATE_ORDER: заказ {obj.name} ({obj.id}) на маршрут {day_text(day)}. "
+                "Лист уже опубликован, в файл не добавляю.")
+        key = ctx.run_key(self, obj.id)
+        if await ctx.step_done(self, key, "late"):
+            return text
+        await ctx.channels.route_note(
+            "LATE_ORDER", order=obj.name, order_id=obj.id, route_date=day.isoformat())
+        for chat in self.notify_chats:
+            chat = str(chat).strip()
+            if chat:
+                await ctx.channels.telegram_message(chat, text)
+        if not ctx.settings.dry_run:
+            await ctx.mark_step(self, key, "late", "ok")
+        log.info("поздний заказ %s %s %s", obj.name, obj.id, day.isoformat())
+        return text
 
     def _hours(self, obj: Entity) -> str:
         if not str(self.hours_field).strip():
@@ -322,10 +346,6 @@ class LogisticsSheet(Automation):
         return str(value).strip()
 
     async def _phone(self, obj: Entity, ctx: Context) -> str:
-        # Приоритет — только поля JSON API, без отдельного «основного» признака у контакта.
-        # 1. Доп. поле заказа phone_field, если параметр задан.
-        # 2. counterparty.phone — городской, уже в expand agent.
-        # 3. Первый непустой phone контактного лица в порядке rows.
         if str(self.phone_field).strip():
             value = obj.attr(self.phone_field)
             if value is not None and str(value).strip():
@@ -335,18 +355,96 @@ class LogisticsSheet(Automation):
             return agent_phone
         if not obj.agent.id:
             return ""
-        async for row in ctx.ms.iterate(f"entity/counterparty/{obj.agent.id}/contactpersons", limit=100):
+        async for row in ctx.ms.iterate(
+                f"entity/counterparty/{obj.agent.id}/contactpersons", limit=100):
             phone = str(row.get("phone") or "").strip()
             if phone:
                 return phone
         return ""
 
 
-class ChannelBusy(Exception):
-    """Файл даты занят другим запуском. Повтор — обычная лестница runs."""
+@register
+class LogisticsPublish(Automation):
+    kind = "logistics_publish"
+    title = "Публикация маршрутного листа"
+    scheduled = True
+    defaults = {"at": "07:00", "folder": ""}
+
+    def validate(self) -> None:
+        try:
+            parsed = datetime.strptime(str(self.at), "%H:%M")
+        except ValueError:
+            raise ConfigError(f"{self.name}: at «{self.at}», нужно ЧЧ:ММ") from None
+        if parsed.strftime("%H:%M") != str(self.at):
+            raise ConfigError(f"{self.name}: at «{self.at}», нужно ЧЧ:ММ")
+        if not str(self.folder).strip():
+            raise ConfigError(f"{self.name}: нужна папка Диска")
+
+    def slot(self, now: datetime) -> str | None:
+        local = now.astimezone(MSK) if now.tzinfo else now.replace(tzinfo=MSK)
+        if local.strftime("%H:%M") < str(self.at):
+            return None
+        return local.strftime("%Y-%m-%d")
+
+    async def run_scheduled(self, ctx: Context, slot: str) -> str:
+        day = date.fromisoformat(slot)
+        name = file_name(day)
+        path = file_path(self.folder, day)
+        if ctx.settings.dry_run:
+            await ctx.channels.route_note("WOULD_PUBLISH", day=slot, file=name)
+            return f"WOULD_PUBLISH {name}"
+        doc = _load_day(await ctx.storage.json_update(_day_key(day), _freeze))
+        if doc["status"] == "published" and doc.get("file"):
+            return f"уже опубликован {name}"
+        if doc["status"] == "published":
+            await ctx.channels.route_note("PUBLISH_EMPTY", day=slot)
+            return f"нет заказов {name}"
+        orders = [doc["orders"][oid] for oid in doc["frozen_ids"]]
+        data = await _payload(ctx, day, orders, doc["publication_id"])
+        digest = hashlib.sha256(data).hexdigest()
+        md5 = hashlib.md5(data, usedforsecurity=False).hexdigest()
+        meta = await _place(ctx, path, data, md5)
+        file = {
+            "path": path,
+            "id": str(meta.get("path") or path),
+            "sha256": digest,
+            "md5": md5,
+            "filename": name,
+            "size": len(data),
+        }
+        await ctx.storage.json_update(_day_key(day), lambda raw, item=file: _save_file(raw, item))
+        for order in orders:
+            await _write_pointer(ctx, order["id"], "published", day, order.get("transition_at"))
+        await ctx.channels.route_note(
+            "PUBLISH", day=slot, file=name, orders=len(orders), sha256=digest)
+        log.info("опубликован %s заказов %s", name, len(orders))
+        return f"PUBLISH {name} заказов {len(orders)}"
 
 
-def _load_file(raw: str | None) -> dict | None:
-    if not raw:
-        return None
-    return json.loads(raw)
+async def _payload(ctx: Context, day: date, orders: list[dict], publication_id: str) -> bytes:
+    cached = await ctx.storage.get(_xlsx_key(day))
+    if cached:
+        return base64.b64decode(cached)
+    data = build_route_xlsx(day_text(day), orders, publication_id)
+    await ctx.storage.set(_xlsx_key(day), base64.b64encode(data).decode("ascii"))
+    return data
+
+
+async def _place(ctx: Context, path: str, data: bytes, md5: str) -> dict:
+    current = await ctx.channels.disk_stat(path)
+    if current:
+        return _same(current, md5)
+    try:
+        meta = await ctx.channels.disk_upload_new(path, data)
+    except DiskError as exc:
+        current = await ctx.channels.disk_stat(path)
+        if current:
+            return _same(current, md5)
+        raise DiskError(exc.status, "загрузка не подтверждена, файл не перезаписываю") from exc
+    return _same(meta, md5)
+
+
+def _same(meta: dict | None, md5: str) -> dict:
+    if not meta or meta.get("md5") != md5:
+        raise DiskError(409, "файл уже есть и не совпадает, не перезаписываю")
+    return meta

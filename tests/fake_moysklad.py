@@ -135,12 +135,15 @@ class FakeMoySklad:
         return None
 
     def webhook_payload(self, type_: str, id_: str, action: str = "UPDATE",
-                        fields: list[str] | None = None) -> dict:
+                        fields: list[str] | None = None,
+                        moment: str | None = "2026-10-25 12:00:00") -> dict:
         event = {**meta(type_, id_), "action": action, "accountId": "acc"}
         if fields is not None:
             event["updatedFields"] = fields
-        return {"auditContext": {"moment": "2026-10-25 12:00:00", "uid": "admin@cultura"},
-                "events": [event]}
+        payload = {"events": [event]}
+        if moment is not None:
+            payload["auditContext"] = {"moment": moment, "uid": "admin@cultura"}
+        return payload
 
     # ── транспорт ────────────────────────────────────────────────────────────
 

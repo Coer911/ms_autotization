@@ -21,7 +21,17 @@ log = logging.getLogger("hub.ingest")
 MSK = ZoneInfo("Europe/Moscow")
 
 
+def _audit_moment(payload: dict) -> str | None:
+    """Дата изменения из вебхука. Поле customerorder.updated сюда не подставляется."""
+    audit = payload.get("auditContext")
+    if not isinstance(audit, dict):
+        return None
+    text = str(audit.get("moment") or "").strip()
+    return text or None
+
+
 def parse_webhook(payload: dict) -> list[Event]:
+    moment = _audit_moment(payload)
     out = []
     for e in payload.get("events", []):
         meta = e.get("meta", {})
@@ -29,7 +39,7 @@ def parse_webhook(payload: dict) -> list[Event]:
             continue
         out.append(Event(entity=meta["type"], entity_id=entity_id(meta["href"]),
                          action=e.get("action", "UPDATE"), fields=e.get("updatedFields"),
-                         source="webhook"))
+                         source="webhook", moment=moment))
     return out
 
 

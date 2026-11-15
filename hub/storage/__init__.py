@@ -60,6 +60,7 @@ events = Table(
     Column("action", String(16), nullable=False),
     Column("fields", Text),
     Column("source", String(16), nullable=False),
+    Column("moment", String(40)),
     Column("received_at", String(20), nullable=False),
     Column("lease_until", String(20)),
     Column("worker", String(64)),
@@ -147,6 +148,19 @@ class Snapshot:
     advanced: bool                # снимок сдвинут этим вызовом (не устаревшее событие)
 
 
+async def _ensure_event_moment(conn: AsyncConnection, dialect: str) -> None:
+    """Старая база без колонки момента: create_all её не добавит."""
+    if dialect == "sqlite":
+        rows = await conn.execute(text("PRAGMA table_info(events)"))
+        names = {row[1] for row in rows}
+    else:
+        rows = await conn.execute(text(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'events'"))
+        names = {row[0] for row in rows}
+    if "moment" not in names:
+        await conn.execute(text("ALTER TABLE events ADD COLUMN moment VARCHAR(40)"))
+
+
 def normalize_url(url: str) -> str:
     """postgresql://… → postgresql+asyncpg://…; путь без схемы → SQLite-файл."""
     if url.startswith(("postgres://", "postgresql://")):
@@ -198,6 +212,7 @@ class Storage:
                 cur.close()
         async with engine.begin() as conn:
             await conn.run_sync(metadata.create_all)
+            await _ensure_event_moment(conn, engine.dialect.name)
         return cls(engine)
 
     @property
@@ -220,7 +235,7 @@ class Storage:
         stmt = self._insert(events).values(
             request_id=request_id, entity=ev.entity, entity_id=ev.entity_id, action=ev.action,
             fields=json.dumps(ev.fields) if ev.fields is not None else None,
-            source=ev.source, received_at=iso(now()), attempts=0,
+            source=ev.source, moment=ev.moment or None, received_at=iso(now()), attempts=0,
         ).on_conflict_do_nothing(index_elements=["request_id", "entity", "entity_id"])
         async with self._tx() as conn:
             return (await conn.execute(stmt)).rowcount == 1
@@ -235,12 +250,13 @@ class Storage:
         stmt = (update(events).where(events.c.id.in_(ids)).where(free)
                 .values(lease_until=later(lease), worker=worker)
                 .returning(events.c.id, events.c.entity, events.c.entity_id, events.c.action,
-                           events.c.fields, events.c.source, events.c.attempts))
+                           events.c.fields, events.c.source, events.c.moment, events.c.attempts))
         async with self._tx() as conn:
             rows = (await conn.execute(stmt)).all()
         out = [Claimed(r.id, Event(entity=r.entity, entity_id=r.entity_id, action=r.action,
                                    fields=json.loads(r.fields) if r.fields else None,
-                                   source=r.source), r.attempts) for r in rows]
+                                   source=r.source, moment=r.moment or None), r.attempts)
+               for r in rows]
         return sorted(out, key=lambda c: c.id)
 
     async def complete(self, ids: list[int]) -> None:
@@ -386,6 +402,20 @@ class Storage:
         stmt = stmt.on_conflict_do_update(index_elements=["key"], set_={"value": value})
         async with self._tx() as conn:
             await conn.execute(stmt)
+
+    async def json_update(self, key: str, mutator) -> str:
+        """Атомарно прочитать и записать значение. mutator(None | str) → новая строка."""
+        async with self._tx() as conn:
+            ins = self._insert(kv).values(key=key, value="")
+            ins = ins.on_conflict_do_nothing(index_elements=["key"])
+            await conn.execute(ins)
+            query = select(kv.c.value).where(kv.c.key == key)
+            if self.dialect == "postgresql":
+                query = query.with_for_update()
+            current = (await conn.execute(query)).scalar_one()
+            updated = mutator(None if current == "" else current)
+            await conn.execute(update(kv).where(kv.c.key == key).values(value=updated))
+            return updated
 
     # ── лидер: опрос и расписание должны идти ровно в одном процессе ────────
 
