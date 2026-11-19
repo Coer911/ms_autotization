@@ -11,6 +11,8 @@ class Event:
     action: str                           # CREATE | UPDATE | DELETE | POLL | MANUAL
     fields: list[str] | None = None       # updatedFields из вебхука с diffType=FIELDS
     source: str = "webhook"
+    # момент аудита вебхука (auditContext.moment). Опрос его не приносит.
+    moment: str | None = None
     # заполняет движок по снимку предыдущего состояния:
     previous_state: str | None = None     # статус до изменения (None — хаб видит впервые)
     is_new: bool = False                  # сущность хаб видит впервые
@@ -38,5 +40,8 @@ def merge(events: list[Event]) -> Event:
         action = "DELETE"
     else:
         action = next(a for a in actions if a != "DELETE")
+    moments = {e.moment for e in events if e.moment}
+    # Два разных момента — не угадываем, какой из них смена статуса.
+    moment = next(iter(moments)) if len(moments) == 1 else None
     return Event(entity=first.entity, entity_id=first.entity_id, action=action, fields=merged,
-                 source=first.source)
+                 source=first.source, moment=moment)

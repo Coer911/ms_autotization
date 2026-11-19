@@ -1,3 +1,4 @@
+import hashlib
 import os
 import sys
 from pathlib import Path
@@ -10,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from fake_moysklad import FakeMoySklad  # noqa: E402
 
 from hub.channels import ChannelError, Channels  # noqa: E402
+from hub.channels.yandex_disk import DiskError  # noqa: E402
 from hub.moysklad import MoySklad  # noqa: E402
 from hub.runtime import Hub  # noqa: E402
 from hub.settings import Settings  # noqa: E402
@@ -19,6 +21,43 @@ from hub.storage import Storage  # noqa: E402
 DB_URL = os.environ.get("HUB_TEST_DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 
 
+class DiskBook:
+    """Память Диска: новый файл принимается, занятый путь не перезаписывается."""
+
+    def __init__(self):
+        self.files: dict[str, bytes] = {}
+        self.uploads = 0
+        self.reads = 0
+        self.mode = "ok"
+
+    def stat(self, path: str) -> dict | None:
+        self.reads += 1
+        if self.mode == "unconfirmed":
+            return None
+        body = self.files.get(path)
+        if body is None:
+            return None
+        return {
+            "path": path, "type": "file", "size": len(body),
+            "name": path.rsplit("/", 1)[-1],
+            "md5": hashlib.md5(body, usedforsecurity=False).hexdigest(),
+        }
+
+    def upload(self, path: str, body: bytes) -> dict:
+        if path in self.files and self.mode != "unconfirmed":
+            raise DiskError(409, "файл уже есть, не перезаписываю")
+        if self.mode == "fail":
+            raise DiskError(503, "Диск 503")
+        self.files[path] = bytes(body)
+        self.uploads += 1
+        if self.mode == "unconfirmed":
+            raise DiskError(202, "файл принят, но ещё не на Диске")
+        found = self.stat(path)
+        if found is None:
+            raise DiskError(202, "загрузка не подтверждена")
+        return found
+
+
 class RecordingChannels(Channels):
     """Каналы без сети: записывают отправки, умеют падать заданное число раз."""
 
@@ -26,6 +65,7 @@ class RecordingChannels(Channels):
         super().__init__(settings)
         self.emails, self.documents, self.messages, self.hooks, self.alerts = [], [], [], [], []
         self.fail = {}
+        self.disk = DiskBook()
 
     def _maybe_fail(self, kind):
         if self.fail.get(kind, 0) > 0:
@@ -63,6 +103,19 @@ class RecordingChannels(Channels):
 
     async def alert(self, text):
         self.alerts.append(text)
+
+    def _disk_guard(self):
+        if self.s.dry_run:
+            raise ChannelError("HUB_DRY_RUN: запись в Диск запрещена")
+        self._maybe_fail("disk")
+
+    async def disk_stat(self, path):
+        self._disk_guard()
+        return self.disk.stat(path)
+
+    async def disk_upload_new(self, path, body):
+        self._disk_guard()
+        return self.disk.upload(path, body)
 
 
 def settings_for(automations: dict, dry_run: bool = False) -> Settings:
@@ -115,6 +168,8 @@ async def make_hub(fake):
 
 
 async def webhook(hub: Hub, fake: FakeMoySklad, type_: str, id_: str, rid: str,
-                  action: str = "UPDATE", fields: list[str] | None = None) -> int:
+                  action: str = "UPDATE", fields: list[str] | None = None,
+                  moment: str | None = "2026-10-25 12:00:00") -> int:
     from hub.ingest import accept_webhook
-    return await accept_webhook(hub.storage, fake.webhook_payload(type_, id_, action, fields), rid)
+    payload = fake.webhook_payload(type_, id_, action, fields, moment=moment)
+    return await accept_webhook(hub.storage, payload, rid)

@@ -46,6 +46,7 @@ class FakeMoySklad:
         self.customentities: dict[str, list[dict]] = {}
         self.publications: dict[str, list] = {}
         self.webhooks: list[dict] = []
+        self.contactpersons: dict[str, list[dict]] = {}
         self.calls: list[tuple[str, str]] = []
         self.violations: list[str] = []
         self.template_names = {kind: list(names) for kind, names in TEMPLATES.items()}
@@ -134,12 +135,15 @@ class FakeMoySklad:
         return None
 
     def webhook_payload(self, type_: str, id_: str, action: str = "UPDATE",
-                        fields: list[str] | None = None) -> dict:
+                        fields: list[str] | None = None,
+                        moment: str | None = "2026-10-25 12:00:00") -> dict:
         event = {**meta(type_, id_), "action": action, "accountId": "acc"}
         if fields is not None:
             event["updatedFields"] = fields
-        return {"auditContext": {"moment": "2026-10-25 12:00:00", "uid": "admin@cultura"},
-                "events": [event]}
+        payload = {"events": [event]}
+        if moment is not None:
+            payload["auditContext"] = {"moment": moment, "uid": "admin@cultura"}
+        return payload
 
     # ── транспорт ────────────────────────────────────────────────────────────
 
@@ -194,6 +198,9 @@ class FakeMoySklad:
             return httpx.Response(200, json={"meta": {"size": len(rows)}, "rows": rows})
         if m := re.fullmatch(r"entity/customentity/([\w-]+)", path):
             rows = self.customentities.get(m.group(1), [])
+            return httpx.Response(200, json={"meta": {"size": len(rows)}, "rows": rows})
+        if m := re.fullmatch(r"entity/counterparty/([\w-]+)/contactpersons", path):
+            rows = list(self.contactpersons.get(m.group(1), []))
             return httpx.Response(200, json={"meta": {"size": len(rows)}, "rows": rows})
         if path == "entity/webhook":
             if method == "POST":

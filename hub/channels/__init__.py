@@ -86,6 +86,28 @@ class Channels:
         self.sent.append({"kind": "webhook", "url": url})
         return f"вебхук {url}"
 
+    async def route_note(self, action: str, **info) -> str:
+        """Строка журнала маршрута. В пробном режиме HTTP нет: сюда пишут WOULD_*."""
+        self.sent.append({"kind": action, "dry_run": self.s.dry_run, **info})
+        log.info("%s %s %s", "DRY RUN" if self.s.dry_run else "ROUTE", action, info)
+        return action
+
+    def _disk(self):
+        if self.s.dry_run:
+            raise ChannelError("HUB_DRY_RUN: запись в Диск запрещена")
+        client = getattr(self, "_disk_client", None)
+        if client is None:
+            from .yandex_disk import YandexDisk
+            client = YandexDisk.from_env(self.http)
+            self._disk_client = client
+        return client
+
+    async def disk_stat(self, path: str) -> dict | None:
+        return await self._disk().stat(path)
+
+    async def disk_upload_new(self, path: str, body: bytes) -> dict:
+        return await self._disk().upload_new(path, body)
+
     async def alert(self, text: str) -> None:
         """Сообщить людям, что автоматизация сдалась. Ошибку алерта только логируем."""
         log.error("ALERT %s", text)
