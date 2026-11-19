@@ -67,7 +67,7 @@ automations:
   # переход в сборку пишется в базу. В 07:00 — новый XLSX на Диск.
   # Файл после публикации не меняется. Как включить — docs/yandex-logistics.md
   logistics_sheet:
-    enabled: false
+    enabled: true
     entity: customerorder
     state: "ПОДТВЕРЖДЕН / ОЖИДАЕТ СБОРКИ"
     state_id: ""                     # если задан и у заказа есть id статуса — сравнение по id
@@ -76,7 +76,7 @@ automations:
     notify_chats: []                 # поздний заказ; пусто — только запись в журнале
 
   logistics_publish:
-    enabled: false
+    enabled: true
     at: "07:00"                      # Москва. Утвердить до боевого включения
     folder: ""                       # disk:/папка-пробы , не секрет и не боевая папка
 
