@@ -13,6 +13,8 @@
   journal [-n 20] [--status failed]
   tool <инструмент> '<json>'                — функция бота без LLM: stock, sales, reorder, unpaid…
   ask "<вопрос>"                            — спросить бота из терминала (нужен ANTHROPIC_API_KEY)
+  route-sheet [--month 2026-11] [--state …|all] [--out файл.xlsx]
+                                            — маршрутный лист за месяц по статусу, только чтение
 """
 from __future__ import annotations
 
@@ -355,6 +357,47 @@ async def cmd_ask(s: Settings, question: str) -> int:
     return 0
 
 
+def _route_params(s: Settings) -> dict:
+    """Статус и доп. поля из включённой записи logistics_sheet в config.yaml, если она есть."""
+    for name, params in (s.automations or {}).items():
+        params = params or {}
+        if (params.get("uses") or name) == "logistics_sheet":
+            return params
+    return {}
+
+
+async def cmd_route_sheet(s: Settings, month: str, state: str, out: str,
+                          with_cancelled: bool) -> int:
+    from pathlib import Path
+
+    from .automations.route_xlsx import build_month_xlsx
+    from .route_report import ALL, collect, month_title, parse_month
+    try:
+        first = parse_month(month) if month else datetime.now(MSK).date().replace(day=1)
+    except ValueError as e:
+        bad(str(e))
+        return 1
+    params = _route_params(s)
+    state = state or params.get("state") or "ПОДТВЕРЖДЕН / ОЖИДАЕТ СБОРКИ"
+    async with client(s) as ms:
+        if state.strip().casefold() != ALL:
+            await ms_fields.find_state(ms, "customerorder", state)   # опечатка — сразу ошибка
+        orders = await collect(ms, first, state,
+                               hours_field=str(params.get("hours_field") or "").strip(),
+                               phone_field=str(params.get("phone_field") or "").strip(),
+                               with_cancelled=with_cancelled)
+    label = "все статусы" if state.strip().casefold() == ALL else state
+    title = f"{month_title(first)} · {label}"
+    safe = "все статусы" if label == "все статусы" else label.replace("/", "-")
+    path = Path(out or f"Маршрутный лист — {month_title(first)} ({safe}).xlsx")
+    path.write_bytes(build_month_xlsx(title, orders))
+    no_address = sum(1 for o in orders if not o["address"])
+    ok(f"{path}: заказов {len(orders)}")
+    if no_address:
+        warn(f"без адреса доставки: {no_address} — заполните в заказе")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="python -m hub", description="Хаб автоматизаций МойСклад")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -384,6 +427,11 @@ def main(argv: list[str] | None = None) -> int:
                                 "tech_card | unpaid | product")
     t.add_argument("args", nargs="?", default="{}", help='JSON, например \'{"search": "сироп"}\'')
     sub.add_parser("ask").add_argument("question")
+    rs = sub.add_parser("route-sheet", help="маршрутный лист за месяц по статусу (только чтение)")
+    rs.add_argument("--month", default="", help="ГГГГ-ММ, по умолчанию текущий месяц")
+    rs.add_argument("--state", default="", help="статус заказа или all; по умолчанию из logistics_sheet")
+    rs.add_argument("--out", default="", help="куда сохранить XLSX")
+    rs.add_argument("--with-cancelled", action="store_true", help="при --state all не убирать отменённые")
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -415,6 +463,8 @@ def main(argv: list[str] | None = None) -> int:
         "set-state": lambda: cmd_set(s, args.kind, args.ref, "state", [args.state]),
         "tool": lambda: cmd_tool(s, args.name, args.args),
         "ask": lambda: cmd_ask(s, args.question),
+        "route-sheet": lambda: cmd_route_sheet(s, args.month, args.state, args.out,
+                                               args.with_cancelled),
         "set-field": lambda: cmd_set(s, args.kind, args.ref, "field", [args.field, args.value]),
     }
     try:

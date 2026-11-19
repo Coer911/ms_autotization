@@ -97,7 +97,12 @@ python -m hub set-field counterparties 7812345678 "Канал продаж" HoRe
 python -m hub journal --status failed
 python -m hub tool stock '{"search": "сироп"}'   # функция бота без модели
 python -m hub ask "остатки сиропов"           # вопрос боту из терминала
+python -m hub route-sheet --month 2026-11     # маршрутный лист: заказы ноября в статусе из logistics_sheet
+python -m hub route-sheet --month 2026-11 --state all   # все статусы, кроме отменённых, со столбцом «Статус»
 ```
+
+`route-sheet` только читает МойСклад и сохраняет XLSX рядом (`--out` — другой путь). Вебхуки
+и переход статуса ему не нужны: берутся все заказы с датой в месяце, которые сейчас в статусе.
 
 ## REST API
 
