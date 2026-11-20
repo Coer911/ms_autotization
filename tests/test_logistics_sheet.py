@@ -366,27 +366,39 @@ async def test_existing_file_is_not_replaced(fake, make_hub):
     assert hub.channels.disk.files[path] == foreign
 
 
-async def test_delayed_webhook_after_publish_is_late(fake, make_hub):
+async def test_delayed_webhook_after_publish_moves_to_next_day(fake, make_hub):
     hub = await make_hub(_params(notify_chats=["-1001"]))
     first = _prepare(fake, number="1001")
     delayed = _prepare(fake, number="1002")
-    delayed["agent"]["phone"] = "+7 900 777-66-55"
     await _see(hub, fake, first)
     await _see(hub, fake, delayed)
     await _move(hub, fake, first, rid="first")
-    await _publish(hub)
+    await _publish(hub)                                       # пт 13.11 07:00 — лист вышел
     body = _published(hub)
+    # переход в чт 12.11, но вебхук дошёл в пт после 07:00 (хаб лежал)
     out = await _move(hub, fake, delayed, moment=TRANSITION, rid="delayed")
     assert out[0].status == "done"
-    assert out[0].detail.startswith("LATE_ORDER")
-    assert "+7 900 777-66-55" not in out[0].detail
-    assert hub.channels.messages[-1]["chat"] == "-1001"
-    assert "LATE_ORDER" in hub.channels.messages[-1]["text"]
-    assert "+7 900 777-66-55" not in hub.channels.messages[-1]["text"]
-    assert hub.channels.disk.uploads == 1
+    assert out[0].detail.startswith("MOVED") and "16.11.2026" in out[0].detail   # пт → пн
+    assert hub.channels.messages == []                        # без оповещений
     assert hub.channels.disk.files[file_path(FOLDER, ROUTE)] == body
     saved = json.loads(await hub.storage.get(f"ls:order:{delayed['id']}"))
-    assert saved["status"] == "late" and saved["route_date"] == ROUTE.isoformat()
+    assert saved["status"] == "collected" and saved["route_date"] == "2026-11-16"
+    await _publish(hub, datetime(2026, 11, 16, 7, 0, tzinfo=MSK))
+    monday = hub.channels.disk.files[file_path(FOLDER, date(2026, 11, 16))]
+    ids = [r[0] for r in load_workbook(BytesIO(monday))["_hub"].iter_rows(min_row=2, values_only=True)]
+    assert ids == [delayed["id"]]
+
+
+async def test_order_already_in_published_sheet_is_not_moved(fake, make_hub):
+    hub = await make_hub(_params())
+    order = _prepare(fake)
+    await _see(hub, fake, order)
+    await _move(hub, fake, order, rid="first")
+    await _publish(hub)
+    await _move(hub, fake, order, state="Новый", moment="2026-11-13 09:00:00", rid="back")
+    out = await _move(hub, fake, order, moment="2026-11-13 09:30:00", rid="again")
+    assert out[0].detail.startswith("уже в листе")
+    assert len(hub.channels.disk.files) == 1
 
 
 async def test_dry_run_does_not_write_disk_or_collection(fake, make_hub):

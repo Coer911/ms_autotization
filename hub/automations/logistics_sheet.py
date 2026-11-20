@@ -10,7 +10,7 @@ customerorder.updated датой перехода не считается. Не�
 «ДД.ММ.ГГГГ.xlsx» (вкладка МЛ, формат логиста) и загружает его в папку. Адрес, телефон,
 часы, места и комментарий — дословно из базы логиста (`base_file`), если заказ в ней
 найден, иначе из МойСклад. Уже лежащий файл не перезаписывается и не удаляется.
-Поздний заказ на опубликованную дату остаётся в базе со статусом LATE_ORDER.
+Переход на дату, лист которой уже вышел, — заказ уходит в следующий рабочий день (MOVED).
 """
 from __future__ import annotations
 
@@ -70,6 +70,14 @@ def route_date(moment: datetime) -> date:
     """Следующий пн–пт после календарной даты момента. Праздники не учитываются."""
     local = moment.astimezone(MSK) if moment.tzinfo else moment.replace(tzinfo=MSK)
     day = local.date() + timedelta(days=1)
+    while day.weekday() >= 5:
+        day += timedelta(days=1)
+    return day
+
+
+def next_route_day(day: date) -> date:
+    """Следующий пн–пт после даты маршрута."""
+    day += timedelta(days=1)
     while day.weekday() >= 5:
         day += timedelta(days=1)
     return day
@@ -175,9 +183,7 @@ def _upsert(raw: str | None, order: dict) -> str:
     doc = _load_day(raw)
     oid = order["id"]
     if doc["status"] != "open":
-        if oid not in doc.get("frozen_ids", []) and oid not in doc["late"]:
-            doc["late"].append(oid)
-        return _dump(doc)
+        return _dump(doc)                # дата заморожена — заказ уйдёт на следующий день
     doc["orders"][oid] = order
     return _dump(doc)
 
@@ -300,21 +306,13 @@ class LogisticsSheet(Automation):
                 await _write_pointer(ctx, obj.id, "pending", day, moment)
         if record.get("status") == "published":
             return f"уже в листе {obj.name}"
-        if record.get("status") == "late":
-            return await self._late_notice(ctx, obj, date.fromisoformat(record["route_date"]))
         day = date.fromisoformat(record["route_date"])
+        transition = record.get("transition_at") or ""
         if ctx.settings.dry_run:
-            doc = _load_day(await ctx.storage.get(_day_key(day)))
-            if doc["status"] != "open":
-                return f"WOULD_LATE {obj.name} ({obj.id}) {day_text(day)}"
-            return f"WOULD_COLLECT {obj.name} ({obj.id}) {day_text(day)}"
-        doc = _load_day(await ctx.storage.get(_day_key(day)))
-        if doc["status"] != "open":
-            if obj.id in doc.get("frozen_ids", []):
-                await _write_pointer(ctx, obj.id, "published", day, record.get("transition_at"))
-                return f"уже в листе {obj.name}"
-            await _write_pointer(ctx, obj.id, "late", day, record.get("transition_at"))
-            return await self._late_notice(ctx, obj, day)
+            free = await self._open_day(ctx, obj.id, day)
+            if isinstance(free, str):
+                return free
+            return f"WOULD_COLLECT {obj.name} ({obj.id}) {day_text(free)}"
         address = delivery_address(obj)
         if not address:
             message = f"нет адреса доставки, заказ {obj.name} ({obj.id})"
@@ -328,19 +326,46 @@ class LogisticsSheet(Automation):
             "phone": await self._phone(obj, ctx),
             "hours": self._hours(obj),
             "comment": (obj.description or "").strip(),
-            "transition_at": record.get("transition_at") or "",
-            "route_date": day.isoformat(),
+            "transition_at": transition,
         }
-        saved = _load_day(await ctx.storage.json_update(
-            _day_key(day), lambda raw, item=order: _upsert(raw, item)))
-        if obj.id in saved.get("late", []):
-            await _write_pointer(ctx, obj.id, "late", day, record.get("transition_at"))
-            return await self._late_notice(ctx, obj, day)
-        await _write_pointer(ctx, obj.id, "collected", day, record.get("transition_at"))
+        planned = day
+        # Лист на дату уже вышел (поздний переход, хаб лежал) — заказ едет в следующий
+        # рабочий день. Без оповещений: это обычная доставка, просто на день позже.
+        for _ in range(60):
+            free = await self._open_day(ctx, obj.id, day)
+            if isinstance(free, str):
+                await _write_pointer(ctx, obj.id, "published", day, transition)
+                return free
+            day = free
+            item = {**order, "route_date": day.isoformat()}
+            saved = _load_day(await ctx.storage.json_update(
+                _day_key(day), lambda raw, item=item: _upsert(raw, item)))
+            if obj.id in saved["orders"]:
+                break
+            day = next_route_day(day)           # дату заморозили между проверкой и записью
+        else:
+            raise RouteReport(f"не нашёл открытую дату для {obj.name} ({obj.id})")
+        await _write_pointer(ctx, obj.id, "collected", day, transition)
+        if day != planned:
+            await ctx.channels.route_note("MOVED", order=obj.name, order_id=obj.id,
+                                          planned=planned.isoformat(), route_date=day.isoformat())
+            log.info("перенесён %s %s с %s на %s", obj.name, obj.id, planned, day)
+            return f"MOVED {obj.name} ({obj.id}) {day_text(planned)} → {day_text(day)}"
         await ctx.channels.route_note(
             "COLLECT", order=obj.name, order_id=obj.id, route_date=day.isoformat())
         log.info("собран %s %s на %s", obj.name, obj.id, day.isoformat())
         return f"COLLECT {obj.name} ({obj.id}) {day_text(day)}"
+
+    async def _open_day(self, ctx: Context, order_id: str, day: date) -> date | str:
+        """Ближайшая открытая дата начиная с day. Строка — заказ уже в вышедшем листе."""
+        for _ in range(60):
+            doc = _load_day(await ctx.storage.get(_day_key(day)))
+            if doc["status"] == "open":
+                return day
+            if order_id in doc.get("frozen_ids", []):
+                return f"уже в листе {day_text(day)}"
+            day = next_route_day(day)
+        raise RouteReport(f"не нашёл открытую дату для заказа {order_id}")
 
     async def _cancel(self, obj: Entity, ctx: Context) -> str:
         record = _pointer(await ctx.storage.get(_order_key(obj.id)))
@@ -368,23 +393,6 @@ class LogisticsSheet(Automation):
         await ctx.channels.route_note("REMOVE", order=obj.name, order_id=obj.id,
                                       route_date=day.isoformat())
         return f"REMOVE {obj.name} ({obj.id}) из листа {day_text(day)}"
-
-    async def _late_notice(self, ctx: Context, obj: Entity, day: date) -> str:
-        text = (f"LATE_ORDER: заказ {obj.name} ({obj.id}) на маршрут {day_text(day)}. "
-                "Лист уже опубликован, в файл не добавляю.")
-        key = ctx.run_key(self, obj.id)
-        if await ctx.step_done(self, key, "late"):
-            return text
-        await ctx.channels.route_note(
-            "LATE_ORDER", order=obj.name, order_id=obj.id, route_date=day.isoformat())
-        for chat in self.notify_chats:
-            chat = str(chat).strip()
-            if chat:
-                await ctx.channels.telegram_message(chat, text)
-        if not ctx.settings.dry_run:
-            await ctx.mark_step(self, key, "late", "ok")
-        log.info("поздний заказ %s %s %s", obj.name, obj.id, day.isoformat())
-        return text
 
     def _hours(self, obj: Entity) -> str:
         if not str(self.hours_field).strip():
