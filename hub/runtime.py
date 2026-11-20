@@ -106,6 +106,18 @@ class Hub:
             tasks.append(self._loop("опрос", self.poll_once, self.settings.poll_seconds))
         await asyncio.gather(*tasks)
 
+    async def _hello(self, role: str) -> None:
+        """Отладка: сообщить в чат, что хаб поднялся и в каком режиме."""
+        if role not in ("all", "scheduler") or not self.channels.debug:
+            return
+        mode = "пробный (ничего не пишу)" if self.settings.dry_run else "боевой"
+        names = {"logistics_sheet": "маршрутный лист", "logistics_publish": "публикация в 07:00",
+                 "daily_upd": "УПД в 17:00"}
+        work = ", ".join(names.get(a.kind, a.title or a.name) for a in self.automations) or "нет"
+        await self.channels.notify(
+            f"✅ Хаб запущен. Режим: {mode}. Работает: {work}. "
+            "Уведомления: отладка — пишу обо всём.", important=False)
+
     async def start(self, role: str | None = None) -> None:
         role = role or self.settings.role
         if self.storage.is_sqlite and role not in ("all", "bot"):
@@ -113,6 +125,7 @@ class Hub:
                                " (HUB_DATABASE_URL); на SQLite запускайте роль all")
         if self.settings.dry_run:
             log.warning("HUB_DRY_RUN включён: наружу и в МойСклад ничего не пишется, только журнал")
+        await self._hello(role)
         log.info("роль %s; автоматизации: %s; слежу за: %s", role,
                  ", ".join(a.name for a in self.automations) or "нет", ", ".join(self.types) or "—")
         if role in ("all", "worker"):

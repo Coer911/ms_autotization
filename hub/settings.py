@@ -47,6 +47,8 @@ class Settings:
     smtp_starttls: bool = False
     telegram_token: str = ""
     alert_chat: str = ""              # Telegram chat_id для ошибок автоматизаций
+    notify_chat: str = ""             # Telegram chat_id для уведомлений; пусто — alert_chat
+    notify_level: str = "normal"      # normal — важное; debug — всё, включая каждую ошибку
     bot_chats: tuple[str, ...] = ()   # кому бот отвечает (chat id через запятую)
     bot_model: str = "claude-opus-5-5"
     bot_effort: str = "medium"        # low | medium | high — глубина размышлений и цена ответа
@@ -81,6 +83,8 @@ class Settings:
             smtp_starttls=_flag(env.get("SMTP_STARTTLS"), False),
             telegram_token=env.get("TELEGRAM_BOT_TOKEN", ""),
             alert_chat=env.get("HUB_ALERT_CHAT", ""),
+            notify_chat=env.get("HUB_NOTIFY_CHAT", "") or env.get("HUB_ALERT_CHAT", ""),
+            notify_level=(env.get("HUB_NOTIFY_LEVEL", "") or "normal").strip().lower(),
             bot_chats=tuple(c.strip() for c in env.get("HUB_BOT_CHATS", "").split(",") if c.strip()),
             bot_model=env.get("HUB_BOT_MODEL", "") or cls.bot_model,
             bot_effort=env.get("HUB_BOT_EFFORT", "") or cls.bot_effort,

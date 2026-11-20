@@ -130,10 +130,13 @@ class Engine:
         except Exception as e:
             log.exception("%s %s: ошибка", a.name, label)
             run = await storage.fail(a.name, key, f"{type(e).__name__}: {e}")
+            from .channels.notify_text import failure_text
+            text = failure_text(a.title or a.name, label, f"{type(e).__name__}: {e}",
+                                run.next_at, run.status == "dead")
             if run.status == "dead":
-                await self.ctx.channels.alert(
-                    f"⚠️ {a.title or a.name}: {label} — {e}. Попыток: {run.attempts},"
-                    f" больше не повторяю.")
+                await self.ctx.channels.alert(text)
+            else:
+                await self.ctx.channels.notify(text, important=False)   # каждая ошибка — в debug
             return Outcome(a.name, label, run.status, str(e))
         await storage.finish(a.name, key, "done", result)
         log.info("%s %s: %s", a.name, label, result)

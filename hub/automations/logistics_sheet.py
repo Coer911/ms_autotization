@@ -297,7 +297,8 @@ class LogisticsSheet(Automation):
                         "Дату не назначаю.")
                 if not ctx.settings.dry_run:
                     await _write_pointer(ctx, obj.id, "manual", None, None)
-                    await ctx.channels.route_note("MANUAL_REVIEW", order=obj.name, order_id=obj.id)
+                    await ctx.channels.route_note("MANUAL_REVIEW", order=obj.name, order_id=obj.id,
+                                                  counterparty=obj.agent.name)
                 log.info("ручная проверка %s %s", obj.name, obj.id)
                 return text
             day = route_date(parsed)
@@ -348,11 +349,13 @@ class LogisticsSheet(Automation):
         await _write_pointer(ctx, obj.id, "collected", day, transition)
         if day != planned:
             await ctx.channels.route_note("MOVED", order=obj.name, order_id=obj.id,
+                                          counterparty=obj.agent.name,
                                           planned=planned.isoformat(), route_date=day.isoformat())
             log.info("перенесён %s %s с %s на %s", obj.name, obj.id, planned, day)
             return f"MOVED {obj.name} ({obj.id}) {day_text(planned)} → {day_text(day)}"
         await ctx.channels.route_note(
-            "COLLECT", order=obj.name, order_id=obj.id, route_date=day.isoformat())
+            "COLLECT", order=obj.name, order_id=obj.id, route_date=day.isoformat(),
+            counterparty=obj.agent.name)
         log.info("собран %s %s на %s", obj.name, obj.id, day.isoformat())
         return f"COLLECT {obj.name} ({obj.id}) {day_text(day)}"
 
@@ -383,6 +386,7 @@ class LogisticsSheet(Automation):
             text = (f"CANCEL_AFTER_PUBLISH: заказ {obj.name} ({obj.id}) отменён, а лист "
                     f"{day_text(day)} уже на Диске. Вычеркните его вручную.")
             await ctx.channels.route_note("CANCEL_AFTER_PUBLISH", order=obj.name,
+                                          counterparty=obj.agent.name,
                                           order_id=obj.id, route_date=day.isoformat())
             for chat in self.notify_chats:
                 if str(chat).strip():
@@ -391,6 +395,7 @@ class LogisticsSheet(Automation):
         await ctx.storage.json_update(_day_key(day), lambda raw: _withdraw(raw, obj.id))
         await _write_pointer(ctx, obj.id, "withdrawn", None, None)
         await ctx.channels.route_note("REMOVE", order=obj.name, order_id=obj.id,
+                                      counterparty=obj.agent.name,
                                       route_date=day.isoformat())
         return f"REMOVE {obj.name} ({obj.id}) из листа {day_text(day)}"
 
@@ -474,6 +479,9 @@ class LogisticsPublish(Automation):
             await _write_pointer(ctx, order["id"], "published", day, order.get("transition_at"))
         await ctx.channels.route_note(
             "PUBLISH", day=slot, file=name, orders=len(orders), sha256=digest)
+        from ..channels.notify_text import route_text
+        await ctx.channels.notify_document(
+            name, data, route_text("PUBLISH", {"day": slot, "file": name, "orders": len(orders)}))
         log.info("опубликован %s заказов %s", name, len(orders))
         return f"PUBLISH {name} заказов {len(orders)}"
 

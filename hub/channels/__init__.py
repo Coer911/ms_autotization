@@ -11,6 +11,7 @@ import httpx
 
 from ..settings import Settings
 from . import email as email_
+from . import notify_text
 
 log = logging.getLogger("hub.channels")
 TELEGRAM_API = "https://api.telegram.org"
@@ -87,10 +88,35 @@ class Channels:
         return f"вебхук {url}"
 
     async def route_note(self, action: str, **info) -> str:
-        """Строка журнала маршрута. В пробном режиме HTTP нет: сюда пишут WOULD_*."""
+        """Строка журнала маршрута + уведомление человеческим языком (важное или debug)."""
         self.sent.append({"kind": action, "dry_run": self.s.dry_run, **info})
         log.info("%s %s %s", "DRY RUN" if self.s.dry_run else "ROUTE", action, info)
+        text = notify_text.route_text(action, info)
+        if text and action != "PUBLISH":           # PUBLISH уходит файлом: notify_document
+            await self.notify(text, important=action in notify_text.IMPORTANT)
         return action
+
+    @property
+    def debug(self) -> bool:
+        return self.s.notify_level == "debug"
+
+    async def notify(self, text: str, important: bool = True) -> None:
+        """В чат уведомлений. Сбой Telegram автоматизацию не роняет — только журнал."""
+        if not (important or self.debug) or not self.s.notify_chat or not self.s.telegram_token:
+            return
+        try:
+            await self.telegram_message(self.s.notify_chat, text)
+        except Exception:
+            log.exception("не удалось отправить уведомление")
+
+    async def notify_document(self, filename: str, data: bytes, caption: str) -> None:
+        if not self.s.notify_chat or not self.s.telegram_token:
+            return
+        try:
+            await self.telegram_document(self.s.notify_chat, filename, data, caption)
+        except Exception:
+            log.exception("не удалось отправить файл в Telegram")
+            await self.notify(caption)
 
     def _disk(self):
         if self.s.dry_run:
@@ -120,8 +146,9 @@ class Channels:
     async def alert(self, text: str) -> None:
         """Сообщить людям, что автоматизация сдалась. Ошибку алерта только логируем."""
         log.error("ALERT %s", text)
-        if self.s.alert_chat and self.s.telegram_token:
+        chat = self.s.alert_chat or self.s.notify_chat
+        if chat and self.s.telegram_token:
             try:
-                await self.telegram_message(self.s.alert_chat, text)
+                await self.telegram_message(chat, text)
             except Exception:
                 log.exception("не удалось отправить алерт")
