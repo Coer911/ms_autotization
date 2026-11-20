@@ -117,6 +117,13 @@ class RecordingChannels(Channels):
         self._disk_guard()
         return self.disk.upload(path, body)
 
+    async def disk_download(self, path):
+        self._maybe_fail("disk_read")
+        body = self.disk.files.get(path)
+        if body is None:
+            raise DiskError(404, f"на Диске нет файла {path}")
+        return body
+
 
 def settings_for(automations: dict, dry_run: bool = False) -> Settings:
     return Settings(ms_token="test-token", api_key="k", webhook_secret="s3cret",

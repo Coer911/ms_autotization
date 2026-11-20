@@ -108,6 +108,15 @@ class Channels:
     async def disk_upload_new(self, path: str, body: bytes) -> dict:
         return await self._disk().upload_new(path, body)
 
+    async def disk_download(self, path: str) -> bytes:
+        """Только чтение — работает и в пробном режиме."""
+        client = getattr(self, "_disk_reader", None)
+        if client is None:
+            from .yandex_disk import YandexDisk
+            client = YandexDisk.from_env(self.http)
+            self._disk_reader = client
+        return await client.download(path)
+
     async def alert(self, text: str) -> None:
         """Сообщить людям, что автоматизация сдалась. Ошибку алерта только логируем."""
         log.error("ALERT %s", text)

@@ -9,18 +9,28 @@ from openpyxl.styles import Alignment, Border, Font, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.page import PageMargins
 
-FORMAT_VERSION = "1"
+FORMAT_VERSION = "2"
+# Заголовки как в файле логиста «ДД.ММ.ГГГГ.xlsx», вкладка МЛ — байт в байт, с висячими пробелами.
 HEADERS = (
-    "№",
-    "Контрагент",
-    "Адрес доставки",
-    "Телефон",
-    "Часы приёмки",
-    "Комментарий логисту",
-    "Выполнено",
+    "Дата доставка",
+    "Адрес отправки ",
+    "комментарий отправителя",
+    "Доставка С",
+    "Доставка ПО",
+    "Адрес доставка",
+    "Офис/квартира отправки",
+    "Покупатель",
+    "контактный телефон",
+    "Наличными",
+    "Цена доставки ",
+    "Кол-во мест",
+    "Комментарий покупателя",
 )
-_WIDTHS = (6, 28, 44, 18, 18, 32, 14)
+SENDER_ADDRESS = "ул. Курляндская, д. 49"
+SENDER_NOTE = "Остановитесь у арки, контактный номер склада 89213892435"
+_WIDTHS = (10.13, 21.63, 21.5, 9, 11.75, 26.38, 9, 26.13, 16.75, 10.13, 13, 9.25, 38.5)
 _FIXED = datetime(2000, 1, 1)
+_FONT = Font(name="Arial", size=10)
 _THIN = Border(
     left=Side(style="thin", color="BFBFBF"),
     right=Side(style="thin", color="BFBFBF"),
@@ -30,56 +40,58 @@ _THIN = Border(
 
 
 def build_route_xlsx(day_text: str, orders: list[dict], publication_id: str) -> bytes:
-    """Один и тот же набор заказов и id публикации даёт одни и те же байты."""
+    """Вкладка МЛ в формате логиста. Один набор строк и id публикации — одни и те же байты.
+
+    Строка заказа: counterparty, address, phone, comment, start, end, places (и id).
+    """
+    day = datetime.strptime(day_text, "%d.%m.%Y")
     wb = Workbook()
     wb.properties.creator = "moysklad-hub"
     wb.properties.lastModifiedBy = "moysklad-hub"
     wb.properties.created = _FIXED
     wb.properties.modified = _FIXED
     sheet = wb.active
-    sheet.title = "Маршрут"
+    sheet.title = "МЛ"
     _page(sheet, day_text, len(orders))
-    header_font = Font(bold=True, name="Calibri", size=11)
-    center = Alignment(wrap_text=True, vertical="center", horizontal="center")
-    left = Alignment(wrap_text=True, vertical="center", horizontal="left")
+    wrap = Alignment(wrap_text=True, vertical="top")
     for col, title in enumerate(HEADERS, 1):
         cell = sheet.cell(1, col, title)
-        cell.font = header_font
-        cell.alignment = center
+        cell.font = _FONT
+        cell.alignment = wrap
         cell.border = _THIN
     for index, width in enumerate(_WIDTHS, 1):
         sheet.column_dimensions[get_column_letter(index)].width = width
-    sheet.row_dimensions[1].height = 30
-    sheet.freeze_panes = "A2"
-    sheet.auto_filter.ref = f"A1:G{max(1, 1 + len(orders))}"
     sheet.print_title_rows = "1:1"
-    for number, order in enumerate(orders, 1):
-        row = number + 1
-        hours = str(order.get("hours") or "")
+    for row, order in enumerate(orders, 2):
         values = [
-            number,
-            order.get("counterparty") or "",
+            day,
+            SENDER_ADDRESS,
+            SENDER_NOTE,
+            int(order.get("start") or 12),
+            int(order.get("end") or 18),
             order.get("address") or "",
+            None,
+            order.get("counterparty") or "",
             order.get("phone") or "",
-            hours,
+            None,
+            None,
+            int(order.get("places") or 1),
             order.get("comment") or "",
-            "",
         ]
         for col, value in enumerate(values, 1):
             cell = sheet.cell(row, col, value)
-            cell.alignment = left
+            cell.font = _FONT
+            cell.alignment = wrap
             cell.border = _THIN
-            if col == 5:
-                cell.number_format = "@"
-                cell.value = hours
-        sheet.row_dimensions[row].height = 32
+        sheet.cell(row, 1).number_format = "dd.mm.yyyy"
     last = max(1, 1 + len(orders))
-    sheet.print_area = f"A1:G{last}"
+    sheet.print_area = f"A1:M{last}"
     hidden = wb.create_sheet("_hub")
     hidden.sheet_state = "hidden"
-    hidden.append(("order_id", "route_date", "format_version", "publication_id"))
+    hidden.append(("order_id", "route_date", "format_version", "publication_id", "source"))
     for order in orders:
-        hidden.append((order["id"], day_text, FORMAT_VERSION, publication_id))
+        hidden.append((order["id"], day_text, FORMAT_VERSION, publication_id,
+                       order.get("source") or ""))
     out = BytesIO()
     wb.save(out)
     return out.getvalue()

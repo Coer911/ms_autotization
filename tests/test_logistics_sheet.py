@@ -76,13 +76,16 @@ async def _see(hub, fake, order):
 
 async def _move(hub, fake, order, state=TARGET, moment=TRANSITION, rid="go"):
     fake.set_state("customerorder", order["id"], state)
-    fake.db["customerorder"][order["id"]]["updated"] = MISLEADING_UPDATED
+    # updated растёт с каждой правкой (снимок статуса двигается только вперёд),
+    # но всегда позже момента перехода — датой маршрута он не считается
+    _move.n = getattr(_move, "n", 0) + 1
+    fake.db["customerorder"][order["id"]]["updated"] = f"{MISLEADING_UPDATED[:-3]}{_move.n:03d}"
     await webhook(hub, fake, "customerorder", order["id"], rid, moment=moment)
     return await hub.tick()
 
 
 def _published(hub):
-    return next(iter(hub.channels.disk.files.values()))
+    return next(body for path, body in hub.channels.disk.files.items() if path != BASE_PATH)
 
 
 async def _publish(hub, when=None):
@@ -268,19 +271,22 @@ async def test_publish_writes_xlsx_once(fake, make_hub):
     assert hub.channels.disk.uploads == 1
     body = _published(hub)
     book = load_workbook(BytesIO(body))
-    sheet = book["Маршрут"]
+    sheet = book["МЛ"]
     assert [cell.value for cell in sheet[1]] == list(HEADERS)
-    assert sheet["A2"].value == 1 and sheet["B2"].value == "ООО «Ромашка»"
-    assert sheet["C2"].value == "Тестовая улица, 1"
-    assert sheet["D2"].value == "+7 900 111-22-33"
-    assert sheet["E2"].value == "10-14" and sheet["E2"].number_format == "@"
-    assert sheet["F2"].value == "позвонить утром" and not sheet["G2"].value
-    assert sheet["A3"].value == 2
+    assert sheet["A2"].value == datetime(2026, 11, 13) and sheet["A2"].number_format == "dd.mm.yyyy"
+    assert sheet["B2"].value == "ул. Курляндская, д. 49"
+    assert sheet["H2"].value == "ООО «Ромашка»"
+    assert sheet["F2"].value == "Тестовая улица, 1"
+    assert sheet["I2"].value == "+7 900 111-22-33"
+    assert (sheet["D2"].value, sheet["E2"].value) == (12, 14)      # «10-14»: с 12, до 14
+    assert sheet["M2"].value == "позвонить утром" and sheet["L2"].value == 1
+    assert sheet["G2"].value is None and sheet["J2"].value is None and sheet["K2"].value is None
+    assert sheet.max_row == 3
     assert "Юридический" not in " ".join(str(cell.value or "") for row in sheet.iter_rows() for cell in row)
     hidden = book["_hub"]
     assert hidden.sheet_state == "hidden"
     assert [cell.value for cell in hidden[1]] == [
-        "order_id", "route_date", "format_version", "publication_id"]
+        "order_id", "route_date", "format_version", "publication_id", "source"]
     assert hidden["A2"].value == early["id"]
     assert hidden["B2"].value == ROUTE_TEXT and hidden["C2"].value == FORMAT_VERSION
     assert hidden["D2"].value == hidden["D3"].value
@@ -396,22 +402,180 @@ async def test_dry_run_does_not_write_disk_or_collection(fake, make_hub):
     assert hub.channels.disk.uploads == 0 and hub.channels.disk.files == {}
 
 
-def test_xlsx_hours_stay_text_and_layout_is_for_print():
+def test_xlsx_matches_logist_layout():
     orders = [
-        {"id": "a", "counterparty": "ООО «Ромашка»", "address": "Длинный адрес, дом 1",
-         "phone": "+7 900 000-00-00", "hours": "09:00-18:00", "comment": "комментарий"},
-        {"id": "b", "counterparty": "ИП Петров", "address": "Вторая улица",
-         "phone": "", "hours": "10:00\u201314:00", "comment": ""},
+        {"id": "a", "counterparty": 'ООО "Ромашка"', "address": "Длинный адрес, дом 1",
+         "phone": "8 900 000 00 00\n8 911 111 11 11", "comment": "комментарий",
+         "start": 14, "end": 18, "places": 2},
+        {"id": "b", "counterparty": "ИП Петров", "address": "Вторая улица"},
     ]
     book = load_workbook(BytesIO(build_route_xlsx(ROUTE_TEXT, orders, "pub-1")))
-    sheet = book["Маршрут"]
-    assert sheet.freeze_panes == "A2"
-    assert sheet.column_dimensions["C"].width >= 40
-    assert sheet["C2"].alignment.wrap_text is True
-    assert sheet["E2"].value == "09:00-18:00" and sheet["E2"].number_format == "@"
-    assert sheet["E3"].value == "10:00\u201314:00" and sheet["E3"].number_format == "@"
+    sheet = book["МЛ"]
+    assert [c.value for c in sheet[1]][1] == "Адрес отправки " and len(sheet[1]) == 13
+    assert sheet["I2"].value == "8 900 000 00 00\n8 911 111 11 11"      # все номера, как в базе
+    assert (sheet["D2"].value, sheet["E2"].value, sheet["L2"].value) == (14, 18, 2)
+    assert (sheet["D3"].value, sheet["E3"].value, sheet["L3"].value) == (12, 18, 1)
+    assert sheet["C3"].value.startswith("Остановитесь у арки")
+    assert sheet.max_row == 3
     assert sheet.page_setup.orientation == "landscape"
-    assert sheet.page_setup.fitToWidth == 1
-    assert sheet.print_title_rows == "$1:$1"
-    assert sheet.sheet_properties.pageSetUpPr.fitToPage is True
     assert book["_hub"].sheet_state == "hidden"
+    again = build_route_xlsx(ROUTE_TEXT, orders, "pub-1")
+    assert again == build_route_xlsx(ROUTE_TEXT, orders, "pub-1")
+
+
+# ── создание сразу в статусе, повтор, отмена ────────────────────────────────
+
+async def test_created_directly_in_status_is_collected(fake, make_hub):
+    hub = await make_hub(_params())
+    order = _prepare(fake, state=TARGET)
+    await webhook(hub, fake, "customerorder", order["id"], "create", action="CREATE",
+                  moment=TRANSITION)
+    out = await hub.tick()
+    assert out[0].status == "done" and out[0].detail.startswith("COLLECT")
+    day = json.loads(await hub.storage.get(_day_key(ROUTE)))
+    assert list(day["orders"]) == [order["id"]]
+
+
+async def test_created_in_other_status_is_not_collected(fake, make_hub):
+    hub = await make_hub(_params())
+    order = _prepare(fake, state="Новый")
+    await webhook(hub, fake, "customerorder", order["id"], "create", action="CREATE",
+                  moment=TRANSITION)
+    assert await hub.tick() == []
+
+
+async def test_repeat_press_refreshes_data_keeps_date(fake, make_hub):
+    hub = await make_hub(_params())
+    order = _prepare(fake)
+    await _see(hub, fake, order)
+    await _move(hub, fake, order, rid="first")
+    await _move(hub, fake, order, state="Новый", moment="2026-11-12 18:30:00", rid="back")
+    order["shipmentAddress"] = "Новый адрес, 5"
+    out = await _move(hub, fake, order, moment="2026-11-12 19:00:00", rid="again")
+    assert out[0].status == "done"
+    day = json.loads(await hub.storage.get(_day_key(ROUTE)))
+    assert day["orders"][order["id"]]["address"] == "Новый адрес, 5"
+    assert day["orders"][order["id"]]["transition_at"] == TRANSITION
+
+
+async def test_cancel_before_publish_removes_from_sheet(fake, make_hub):
+    hub = await make_hub(_params())
+    keep = _prepare(fake, number="1001")
+    gone = _prepare(fake, number="1002")
+    for order in (keep, gone):
+        await _see(hub, fake, order)
+        await _move(hub, fake, order, rid=f"go-{order['id']}")
+    out = await _move(hub, fake, gone, state="Отменён", moment="2026-11-12 20:00:00", rid="x")
+    assert out[0].status == "done" and out[0].detail.startswith("REMOVE")
+    await _publish(hub)
+    sheet = load_workbook(BytesIO(_published(hub)))["_hub"]
+    assert [row[0] for row in sheet.iter_rows(min_row=2, values_only=True)] == [keep["id"]]
+    # снова подтвердили — новый переход, новая дата
+    out = await _move(hub, fake, gone, moment="2026-11-13 10:00:00", rid="again")
+    assert "16.11.2026" in out[0].detail
+
+
+async def test_cancel_after_publish_only_notifies(fake, make_hub):
+    hub = await make_hub(_params(notify_chats=["-100"]))
+    order = _prepare(fake)
+    await _see(hub, fake, order)
+    await _move(hub, fake, order)
+    await _publish(hub)
+    out = await _move(hub, fake, order, state="Отменён", moment="2026-11-13 08:00:00", rid="x")
+    assert out[0].detail.startswith("CANCEL_AFTER_PUBLISH")
+    assert hub.channels.messages and "Вычеркните" in hub.channels.messages[0]["text"]
+    assert hub.channels.disk.uploads == 1
+
+
+async def test_cancel_of_unknown_order_is_skipped(fake, make_hub):
+    hub = await make_hub(_params())
+    order = _prepare(fake, state="Собран")
+    await _see(hub, fake, order)
+    out = await _move(hub, fake, order, state="Отменён", rid="x")
+    assert out[0].status == "skipped"
+
+
+# ── база логиста ─────────────────────────────────────────────────────────────
+
+BASE_PATH = "disk:/route-test/База.xlsx"
+
+
+def _base_xlsx(rows):
+    from openpyxl import Workbook
+    wb = Workbook()
+    wb.active.title = "Адреса"
+    ws = wb.create_sheet("Адреса скорая почта на 1 август")
+    ws.append(["Адрес", "Офис/квартира отправки", "Контрагент", "Телефон", "Наличными",
+               "Часы \nприемки", "Кол-мест", "Комментарий", "Выполнено"])
+    for row in rows:
+        ws.append(row)
+    out = BytesIO()
+    wb.save(out)
+    return out.getvalue()
+
+
+def _with_base(**extra):
+    params = _params(**extra)
+    params["route_publish"]["base_file"] = BASE_PATH
+    return params
+
+
+async def test_publish_takes_rows_from_base_verbatim(fake, make_hub):
+    hub = await make_hub(_with_base())
+    hub.channels.disk.files[BASE_PATH] = _base_xlsx([
+        ["наб Реки Фонтанки, 52", None, 'ООО "Ромашка"', "8(924) 744-20-00", None, None, None, "А"],
+        ["Тихая 3", None, "ИП Без Телефона", None, None, None, None, None],
+        ["Морская наб, 15", None, 'ООО "Ромашка" Морская', "8965 024 7745\n8 999 1", None,
+         "с 15:00 до 00:00", 2, 'ресторан "Б"'],
+    ])
+    first = _prepare(fake, number="1001")
+    first["agent"]["name"] = 'ООО "Ромашка"'
+    first["shipmentAddress"] = "190000, Россия, г Санкт-Петербург, Морская наб, 15"
+    second = _prepare(fake, number="1002")
+    second["agent"]["name"] = 'ООО "Ромашка"'
+    second["shipmentAddress"] = "Морская наб, 15"
+    silent = _prepare(fake, number="1004")
+    silent["agent"]["name"] = "ИП Без Телефона"
+    stranger = _prepare(fake, number="1003")
+    stranger["agent"]["name"] = "ИП Нет В Базе"
+    for i, order in enumerate((first, second, stranger, silent)):
+        await _see(hub, fake, order)
+        await _move(hub, fake, order, moment=f"2026-11-12 1{i}:00:00", rid=f"go{i}")
+    out = await _publish(hub)
+    assert out[0].status == "done"
+    sheet = load_workbook(BytesIO(_published(hub)))["МЛ"]
+    rows = list(sheet.iter_rows(min_row=2, values_only=True))
+    assert len(rows) == 3                                   # одна точка — одна строка
+    assert rows[0][5] == "Морская наб, 15" and rows[0][7] == 'ООО "Ромашка" Морская'
+    assert rows[0][8] == "8965 024 7745\n8 999 1"
+    assert (rows[0][3], rows[0][4], rows[0][11]) == (15, 18, 4)
+    assert rows[0][12] == 'ресторан "Б"'
+    assert rows[1][7] == "ИП Нет В Базе" and rows[1][5] == "Тестовая улица, 1"
+    assert rows[2][7] == "ИП Без Телефона" and rows[2][5] == "Тихая 3"
+    assert rows[2][8] == "+7 900 111-22-33"                 # телефона в базе нет — из МойСклад
+    assert any(n["kind"] == "NOT_IN_BASE" for n in hub.channels.sent)
+
+
+async def test_missing_base_fails_and_retries_without_file(fake, make_hub):
+    hub = await make_hub(_with_base())
+    order = _prepare(fake)
+    await _see(hub, fake, order)
+    await _move(hub, fake, order)
+    out = await _publish(hub)
+    assert out[0].status == "failed" and "нет файла" in out[0].detail
+    assert hub.channels.disk.uploads == 0
+
+
+def test_base_match_rules():
+    from hub.automations.route_base import BaseRow, match, window
+    base = [BaseRow('ООО "22"', "Бородинская 2/86", None, "с 14", None, None),
+            BaseRow('ООО "122"', "Другая 1", None, None, None, None),
+            BaseRow('ООО "Ривьера"', "наб Реки Фонтанки, 52", None, None, None, None),
+            BaseRow('ООО "Ривьера" Морская', "Морская наб, 15", None, None, None, None)]
+    assert match(base, 'ООО "22" Catch 22', "").counterparty == 'ООО "22"'
+    assert match(base, 'ООО "Ривьера"', "Морская наб, 15").address == "Морская наб, 15"
+    assert match(base, 'ООО "Ривьера"', "Невский 1") is None        # неоднозначно — не угадываем
+    assert match(base, "ИП Петров", "") is None
+    assert window("с 14") == (14, 18) and window("12-17") == (12, 17)
+    assert window("с 10:00 до 15:00") == (12, 15) and window("c 15:00 до 00:00") == (15, 18)
+    assert window(None) == (12, 18) and window("с 10 до 18") == (12, 18)

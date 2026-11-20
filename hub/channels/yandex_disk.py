@@ -3,6 +3,7 @@
 Документация: https://yandex.ru/dev/disk-api/doc/ru/
 Загрузка — GET /v1/disk/resources/upload?overwrite=false, затем PUT по выданной ссылке.
 Токен на PUT в хранилище не отправляется. Удаления и overwrite=true здесь нет.
+Чтение (база логиста) — GET /v1/disk/resources/download, затем GET по выданной ссылке.
 Редактор Таблиц не вызывается. Токен в журнал и в текст ошибки не попадает.
 """
 from __future__ import annotations
@@ -87,3 +88,21 @@ class YandexDisk:
             raise DiskError(409, "файл уже есть, не перезаписываю")
         self._fail(put)
         raise DiskError(put.status_code, f"Диск {put.status_code}")
+
+
+    async def download(self, path: str) -> bytes:
+        """Файл целиком. Ссылка скачивания — без OAuth-токена, как и при загрузке."""
+        response = await self.http.get(
+            f"{API}/resources/download", params={"path": path}, headers=self._headers())
+        if response.status_code == 404:
+            raise DiskError(404, f"на Диске нет файла {path}")
+        if response.status_code != 200:
+            self._fail(response)
+        info = response.json()
+        href = info.get("href") if isinstance(info, dict) else None
+        if not href:
+            raise DiskError(502, "Диск не выдал ссылку скачивания")
+        got = await self.http.get(href, follow_redirects=True)
+        if got.status_code != 200:
+            raise DiskError(got.status_code, f"Диск {got.status_code} при скачивании")
+        return got.content
