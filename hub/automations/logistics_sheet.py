@@ -290,7 +290,7 @@ class LogisticsSheet(Automation):
         if record is not None and record.get("status") in ("withdrawn", "manual"):
             record = None                    # снова перевели в статус — это новый переход
         if record is None:
-            moment = seen_moment
+            moment = seen_moment or await self._audit_moment(obj, ctx)
             parsed = _parsed_moment(moment)
             if parsed is None:
                 text = (f"MANUAL_REVIEW: нет времени перехода, заказ {obj.name} ({obj.id}). "
@@ -346,7 +346,11 @@ class LogisticsSheet(Automation):
             day = next_route_day(day)           # дату заморозили между проверкой и записью
         else:
             raise RouteReport(f"не нашёл открытую дату для {obj.name} ({obj.id})")
+        again = record.get("status") == "collected"
         await _write_pointer(ctx, obj.id, "collected", day, transition)
+        if again:                                # повторное нажатие: данные обновлены, без шума
+            log.info("обновлён %s %s на %s", obj.name, obj.id, day.isoformat())
+            return f"UPDATE {obj.name} ({obj.id}) {day_text(day)}"
         if day != planned:
             await ctx.channels.route_note("MOVED", order=obj.name, order_id=obj.id,
                                           counterparty=obj.agent.name,
@@ -358,6 +362,27 @@ class LogisticsSheet(Automation):
             counterparty=obj.agent.name)
         log.info("собран %s %s на %s", obj.name, obj.id, day.isoformat())
         return f"COLLECT {obj.name} ({obj.id}) {day_text(day)}"
+
+    async def _audit_moment(self, obj: Entity, ctx: Context) -> str:
+        """Вебхук без момента (или опрос раньше вебхука): время перехода — из аудита заказа.
+
+        Последнее событие, где статус стал целевым; не было смены статуса, а заказ уже в нём —
+        момент создания. Аудит недоступен — пусто (ручная проверка), дату не угадываем.
+        """
+        target, created = "", ""
+        try:
+            async for ev in ctx.ms.iterate(f"entity/{obj.type}/{obj.id}/audit", limit=100):
+                moment = str(ev.get("moment") or "")
+                if ev.get("eventType") == "create":
+                    created = max(created, moment)
+                state = ((ev.get("diff") or {}).get("state") or {}).get("newValue")
+                name = state.get("name") if isinstance(state, dict) else state
+                if name is not None and _norm(str(name)) == _norm(self.state):
+                    target = max(target, moment)
+        except Exception:
+            log.warning("аудит заказа %s недоступен", obj.name, exc_info=True)
+            return ""
+        return target or created
 
     async def _open_day(self, ctx: Context, order_id: str, day: date) -> date | str:
         """Ближайшая открытая дата начиная с day. Строка — заказ уже в вышедшем листе."""
@@ -480,8 +505,12 @@ class LogisticsPublish(Automation):
         await ctx.channels.route_note(
             "PUBLISH", day=slot, file=name, orders=len(orders), sha256=digest)
         from ..channels.notify_text import route_text
-        await ctx.channels.notify_document(
-            name, data, route_text("PUBLISH", {"day": slot, "file": name, "orders": len(orders)}))
+        caption = route_text("PUBLISH", {"day": slot, "file": name, "orders": len(orders)})
+        missing = getattr(self, "_missing", [])
+        if missing:
+            caption += (f"\n📒 Нет в базе адресов ({len(missing)}): {', '.join(missing)}. "
+                        "Взял адрес и телефон из МойСклад — добавьте их в базу.")
+        await ctx.channels.notify_document(name, data, caption)
         log.info("опубликован %s заказов %s", name, len(orders))
         return f"PUBLISH {name} заказов {len(orders)}"
 
@@ -494,6 +523,7 @@ class LogisticsPublish(Automation):
                               str(self.base_sheet or DEFAULT_SHEET))
         rows: list[dict] = []
         seen: dict[tuple, dict] = {}
+        self._missing = []
         for order in orders:
             found = match(base, order.get("counterparty") or "", order.get("address") or "")
             if found is not None:
@@ -518,6 +548,7 @@ class LogisticsPublish(Automation):
                        "comment": order.get("comment") or "", "start": start, "end": end,
                        "places": 1, "source": "МойСклад"}
                 if base:
+                    self._missing.append(row["counterparty"])
                     await ctx.channels.route_note("NOT_IN_BASE", order=order.get("name"),
                                                   counterparty=row["counterparty"])
             rows.append(row)

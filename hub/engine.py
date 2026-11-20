@@ -133,10 +133,12 @@ class Engine:
             from .channels.notify_text import failure_text
             text = failure_text(a.title or a.name, label, f"{type(e).__name__}: {e}",
                                 run.next_at, run.status == "dead")
+            from .channels.notify_text import URGENT
             if run.status == "dead":
                 await self.ctx.channels.alert(text)
-            else:
-                await self.ctx.channels.notify(text, important=False)   # каждая ошибка — в debug
+            elif run.attempts == 1:
+                # о повторах не шумим: первая ошибка — в отладке, у срочных (лист в 07:00) — всегда
+                await self.ctx.channels.notify(text, important=a.kind in URGENT)
             return Outcome(a.name, label, run.status, str(e))
         await storage.finish(a.name, key, "done", result)
         log.info("%s %s: %s", a.name, label, result)

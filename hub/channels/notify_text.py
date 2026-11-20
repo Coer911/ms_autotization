@@ -11,8 +11,10 @@ _WEEKDAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
 
 # важные: про них человек должен узнать и в обычном режиме
 IMPORTANT = frozenset({
-    "PUBLISH", "PUBLISH_EMPTY", "REMOVE", "CANCEL_AFTER_PUBLISH", "MANUAL_REVIEW", "NOT_IN_BASE",
+    "PUBLISH", "PUBLISH_EMPTY", "REMOVE", "CANCEL_AFTER_PUBLISH", "MANUAL_REVIEW",
 })
+# критичные по времени задачи: первая же ошибка — сразу людям, не ждать конца повторов
+URGENT = frozenset({"logistics_publish"})
 
 
 def day(value: object) -> str:
@@ -47,9 +49,6 @@ def route_text(action: str, info: dict) -> str | None:
         case "MANUAL_REVIEW":
             return (f"❓ Заказ {who} перевели в сборку, но МойСклад не прислал время перехода. "
                     "Дату доставки не ставлю — переведите статус ещё раз.")
-        case "NOT_IN_BASE":
-            return (f"📒 {info.get('counterparty') or 'Контрагента'} (заказ {info.get('order')}) "
-                    "нет в базе адресов. Адрес и телефон взял из МойСклад — добавьте его в базу.")
         case "PUBLISH":
             return (f"📄 Маршрутный лист на {when} готов: доставок {info.get('orders')}. "
                     f"Файл «{info.get('file')}» на Диске.")

@@ -47,6 +47,7 @@ class FakeMoySklad:
         self.publications: dict[str, list] = {}
         self.webhooks: list[dict] = []
         self.contactpersons: dict[str, list[dict]] = {}
+        self.audit: dict[str, list[dict]] = {}      # id сущности → события аудита
         self.calls: list[tuple[str, str]] = []
         self.violations: list[str] = []
         self.template_names = {kind: list(names) for kind, names in TEMPLATES.items()}
@@ -201,6 +202,9 @@ class FakeMoySklad:
             return httpx.Response(200, json={"meta": {"size": len(rows)}, "rows": rows})
         if m := re.fullmatch(r"entity/counterparty/([\w-]+)/contactpersons", path):
             rows = list(self.contactpersons.get(m.group(1), []))
+            return httpx.Response(200, json={"meta": {"size": len(rows)}, "rows": rows})
+        if m := re.fullmatch(r"entity/\w+/([\w-]+)/audit", path):
+            rows = list(self.audit.get(m.group(1), []))
             return httpx.Response(200, json={"meta": {"size": len(rows)}, "rows": rows})
         if path == "entity/webhook":
             if method == "POST":
