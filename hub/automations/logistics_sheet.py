@@ -1,7 +1,8 @@
 """Маршрутный лист: сбор перехода и утренний неизменяемый XLSX на Диске.
 
 Вебхук только проверяет переход и пишет заказ в базу хаба. В Диск на этом шаге
-ничего не уходит. Переход — смена статуса на целевой или создание заказа сразу в нём.
+ничего не уходит. Переход — смена статуса на целевой, создание сразу в нём или
+первый снимок уже в нём, если у события есть момент аудита.
 Дата маршрута — следующий пн–пт по Москве от auditContext.moment.
 customerorder.updated датой перехода не считается. Нет момента — ручная проверка,
 дату не угадываем. Отмена до публикации убирает заказ из сбора; после — оповещение.
@@ -268,7 +269,11 @@ class LogisticsSheet(Automation):
             # заказ создали сразу в целевом статусе (статус выбран до первого сохранения)
             return not self._cancelled(obj) and self._target(obj)
         if event.is_new or event.previous_state is None:
-            return False
+            # Первый снимок не CREATE: как создание сразу в статусе, но только с моментом
+            # аудита. Опрос и вебхук без moment дату не получают и updated не подставляем.
+            if not str(event.moment or "").strip():
+                return False
+            return not self._cancelled(obj) and self._target(obj)
         if _norm(event.previous_state) == _norm(obj.state):
             return False
         if self._cancelled(obj):

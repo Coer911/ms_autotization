@@ -186,10 +186,25 @@ async def test_other_status_cancelled_and_first_sight_do_not_collect(fake, make_
     assert await _move(hub, fake, order, state="Собран", rid="other") == []
     await _move(hub, fake, order, state="Отменён", rid="cancel")
     fresh = _prepare(fake, number="1002", state=TARGET)
+    fake.db["customerorder"][fresh["id"]]["updated"] = MISLEADING_UPDATED
     await webhook(hub, fake, "customerorder", fresh["id"], "first", moment=TRANSITION)
+    out = await hub.tick()
+    assert out[0].status == "done" and out[0].detail.startswith("COLLECT")
+    assert ROUTE_TEXT in out[0].detail and "16.11.2026" not in out[0].detail
+    saved = json.loads(await hub.storage.get(f"ls:order:{fresh['id']}"))
+    assert saved["route_date"] == ROUTE.isoformat() and saved["transition_at"] == TRANSITION
+    silent = _prepare(fake, number="1003", state=TARGET)
+    fake.db["customerorder"][silent["id"]]["updated"] = MISLEADING_UPDATED
+    await webhook(hub, fake, "customerorder", silent["id"], "silent", moment=None)
     assert await hub.tick() == []
+    assert await hub.storage.get(f"ls:order:{silent['id']}") is None
+    polled = _prepare(fake, number="1004", state=TARGET)
+    fake.db["customerorder"][polled["id"]]["updated"] = MISLEADING_UPDATED
+    await hub.storage.enqueue(
+        Event("customerorder", polled["id"], "POLL", source="poll"), "poll-first")
+    assert await hub.tick() == []
+    assert await hub.storage.get(f"ls:order:{polled['id']}") is None
     assert hub.channels.disk.uploads == 0
-    assert await hub.storage.get(f"ls:order:{fresh['id']}") is None
 
 
 async def test_audit_moment_not_order_updated(fake, make_hub):
