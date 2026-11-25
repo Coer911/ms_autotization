@@ -3,6 +3,7 @@
 Вебхук только проверяет переход и пишет заказ в базу хаба. В Диск на этом шаге
 ничего не уходит. Переход — смена статуса на целевой, создание сразу в нём или
 первый снимок уже в нём, если у события есть момент аудита.
+Снимок без момента дату не ставит, но и не блокирует поздний вебхук с моментом.
 Дата маршрута — следующий пн–пт по Москве от auditContext.moment.
 customerorder.updated датой перехода не считается. Нет момента — ручная проверка,
 дату не угадываем. Отмена до публикации убирает заказ из сбора; после — оповещение.
@@ -262,7 +263,7 @@ class LogisticsSheet(Automation):
         state = (obj.raw or {}).get("state") or {}
         return state.get("stateType") == "Unsuccessful"
 
-    def wants(self, obj: Entity, event: Event) -> bool:
+    async def wants(self, obj: Entity, event: Event) -> bool:
         if event.action == "DELETE":
             return False
         if event.action == "CREATE":
@@ -275,10 +276,24 @@ class LogisticsSheet(Automation):
                 return False
             return not self._cancelled(obj) and self._target(obj)
         if _norm(event.previous_state) == _norm(obj.state):
-            return False
+            # advance уже записал целевой статус, даже если тот заход был без момента.
+            # Поздний вебхук с одним moment датирует заказ, пока дату ещё не ставили.
+            if not str(event.moment or "").strip() or self._cancelled(obj) or not self._target(obj):
+                return False
+            return not await self._already_dated(obj.id)
         if self._cancelled(obj):
             return True                      # убрать из сбора, если он там есть
         return self._target(obj)
+
+    async def _already_dated(self, order_id: str) -> bool:
+        """Дата маршрута уже выбрана. Повтор того же статуса её не пересчитывает."""
+        storage = getattr(self, "_storage", None)
+        if storage is None:
+            return False
+        record = _pointer(await storage.get(_order_key(order_id)))
+        if not record or record.get("status") in ("withdrawn", "manual"):
+            return False
+        return bool(record.get("route_date"))
 
     def key(self, obj: Entity, event: Event | None) -> str:
         """Свой ключ на каждый переход: повторное нажатие статуса — новый прогон."""

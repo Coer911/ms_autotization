@@ -32,6 +32,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, Response
 
+from ..automations import call_wants
 from ..automations.send_document import MIME
 from ..entities import PRINTABLE, Entity, from_api, resolve_type
 from ..events import Event
@@ -261,7 +262,7 @@ def create_app(settings: Settings | None = None, *, background: bool = True,
         if a.entity != obj.type:
             raise HTTPException(400, f"{name} работает с {a.entity}, а это {obj.type}")
         event = Event(entity=obj.type, entity_id=obj.id, action="MANUAL", source="api")
-        if not force and not a.wants(obj, event):
+        if not force and not await call_wants(a, obj, event):
             return {"status": "not_wanted",
                     "detail": "условия автоматизации не выполнены — повторите с force=1"}
         return asdict(await h.engine.execute(a, obj, event, mode="force" if force else "normal"))

@@ -207,6 +207,56 @@ async def test_other_status_cancelled_and_first_sight_do_not_collect(fake, make_
     assert hub.channels.disk.uploads == 0
 
 
+async def test_later_moment_collects_after_undated_snapshot(fake, make_hub):
+    """Снимок без момента не блокирует поздний вебхук с auditContext.moment."""
+    hub = await make_hub(_params())
+
+    def bare(number: str) -> dict:
+        order = _prepare(fake, number=number, state=TARGET)
+        fake.db["customerorder"][order["id"]]["updated"] = MISLEADING_UPDATED
+        return order
+
+    async def collect(order: dict, rid: str) -> None:
+        await webhook(hub, fake, "customerorder", order["id"], rid, moment=TRANSITION)
+        out = await hub.tick()
+        assert out[0].status == "done" and out[0].detail.startswith("COLLECT")
+        assert ROUTE_TEXT in out[0].detail and "16.11.2026" not in out[0].detail
+        saved = json.loads(await hub.storage.get(f"ls:order:{order['id']}"))
+        assert saved["route_date"] == ROUTE.isoformat()
+        assert saved["transition_at"] == TRANSITION
+
+    silent = bare("2001")
+    await webhook(hub, fake, "customerorder", silent["id"], "silent", moment=None)
+    assert await hub.tick() == []
+    assert await hub.storage.get(f"ls:order:{silent['id']}") is None
+    await collect(silent, "silent-go")
+
+    polled = bare("2002")
+    await hub.storage.enqueue(
+        Event("customerorder", polled["id"], "POLL", source="poll"), "poll-bare")
+    assert await hub.tick() == []
+    await collect(polled, "poll-go")
+
+    mixed = bare("2003")
+    await hub.storage.enqueue(
+        Event("customerorder", mixed["id"], "UPDATE", moment="2026-11-12 10:00:00",
+              source="webhook"), "mix-a")
+    await hub.storage.enqueue(
+        Event("customerorder", mixed["id"], "UPDATE", moment="2026-11-15 12:00:00",
+              source="webhook"), "mix-b")
+    assert await hub.tick() == []
+    assert await hub.storage.get(f"ls:order:{mixed['id']}") is None
+    await collect(mixed, "mix-go")
+
+    await webhook(hub, fake, "customerorder", silent["id"], "again",
+                  moment="2026-11-14 12:00:00")
+    assert await hub.tick() == []
+    saved = json.loads(await hub.storage.get(f"ls:order:{silent['id']}"))
+    assert saved["route_date"] == ROUTE.isoformat()
+    assert saved["transition_at"] == TRANSITION
+    assert hub.channels.disk.uploads == 0
+
+
 async def test_audit_moment_not_order_updated(fake, make_hub):
     hub = await make_hub(_params())
     order = _prepare(fake)
