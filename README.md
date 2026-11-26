@@ -180,6 +180,17 @@ python -m hub ask "сколько боярышника докупить на 15 
 
 Подробно, с неисправностями — скил [deploy-hub](.claude/skills/deploy-hub/SKILL.md).
 
+Ozon Connect — второй образ, не замена хаба. Корневой `Dockerfile` и команда `python -m hub serve` не меняются.
+
+```bash
+docker build -t ozon-connect -f ozon_connect/Dockerfile ozon_connect
+docker run --rm -p 8081:8080 --env-file .env.ozon.example ozon-connect
+curl localhost:8081/healthz
+```
+
+Переменные — [`.env.ozon.example`](.env.ozon.example). Каталоги этот образ не читает и наружу не пишет.
+Аудит артикулов — [docs/ozon/article-mapping.md](docs/ozon/article-mapping.md).
+
 ## Документация МойСклад
 
 [`docs/moysklad-api/`](docs/moysklad-api) — копия официальной документации JSON API 1.2.
