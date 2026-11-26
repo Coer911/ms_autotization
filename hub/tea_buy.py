@@ -25,7 +25,7 @@ from openpyxl import load_workbook
 _ENDINGS = (
     "иями", "ями", "ами", "иях", "ях", "ах", "иям", "ям", "ам", "ием",
     "ого", "ему", "ыми", "ими", "ов", "ев", "ей", "ой", "ою", "ею", "ом", "ем",
-    "ая", "яя", "ое", "ее", "ые", "ие", "ия", "ий", "ый", "ую", "юю",
+    "ая", "яя", "ое", "ее", "ые", "ие", "ия", "ии", "ий", "ый", "ую", "юю",
     "а", "я", "ы", "и", "у", "ю", "е", "о", "",
 )
 _UNIT_QTY = {"кг", "г", "гр", "мг", "мл", "л", "шт"}
@@ -88,9 +88,13 @@ def _form(title: str, stem: str, *, phrase: bool = False) -> bool:
         if not rest.startswith(ending):
             continue
         tail = rest[len(ending):]
-        if tail == "" or tail[0] in ",.:;()":
+        if tail == "":
             return True
-        if tail[0] == " " and (phrase or tail.lstrip().startswith("(")):
+        # Скобка в названии («Купаж (жасмин)») — это техкарта, не шапка.
+        # «Вес (кг)» проходит отдельно: у веса phrase=True.
+        if phrase and tail[0] in " ,.:;()":
+            return True
+        if not phrase and tail[0] in ",.:;":
             return True
     return False
 

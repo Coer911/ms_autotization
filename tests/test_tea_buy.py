@@ -116,6 +116,30 @@ def test_cli_lists_positions_without_token(tmp_path, monkeypatch, capsys):
     assert "не создан" in capsys.readouterr().out
 
 
+def test_parenthetical_names_stay_blends_and_позиции_is_a_column():
+    def blends(book: Workbook) -> None:
+        ws = book.active
+        ws.title = "Купажи"
+        ws.append(["Компонент", "Купаж (жасмин)", "Продукт (дня)", "Рецепт (улун)", "Сырьё (зелёное)"])
+        ws.append(["Сенча", 1, 2, 3, 4])
+
+    rows = {(row.name, row.unit): row for row in positions(_xlsx(blends))}
+    assert rows[("Сенча", "")].quantity == 10
+    assert set(rows[("Сенча", "")].cards) == {
+        "Купажи: Купаж (жасмин)", "Купажи: Продукт (дня)",
+        "Купажи: Рецепт (улун)", "Купажи: Сырьё (зелёное)",
+    }
+
+    def positions_header(book: Workbook) -> None:
+        ws = book.active
+        ws.title = "Ароматизация"
+        ws.append(["Позиции", "Количество", "Ед"])
+        ws.append(["Бергамот", 5, "г"])
+
+    rows = {(row.name, row.unit): row.quantity for row in positions(_xlsx(positions_header))}
+    assert rows == {("Бергамот", "г"): 5}
+
+
 def test_inflected_headers_are_columns():
     def build(book: Workbook) -> None:
         ws = book.active
