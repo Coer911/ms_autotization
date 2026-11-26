@@ -63,21 +63,22 @@ def _handler(settings: Settings):
             self._reject_write()
 
         def _reject_write(self) -> None:
-            length = int(self.headers.get("Content-Length", "0") or 0)
-            if length > 0:
-                self.rfile.read(min(length, 65_536))
+            # Тело не читаем. Хвост длиннее буфера и chunked иначе остаются
+            # на сокете, и следующий запрос на keep-alive читается из них.
             self._json(405, {
                 "error": {
                     "code": "WRITE_DISABLED",
                     "message": "Ozon Connect не принимает Push и не пишет во внешние API",
                 },
-            })
+            }, close=True)
 
-        def _json(self, status: int, payload: dict) -> None:
+        def _json(self, status: int, payload: dict, close: bool = False) -> None:
             raw = json.dumps(payload, ensure_ascii=False).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(raw)))
+            if close:
+                self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(raw)
 

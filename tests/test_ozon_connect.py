@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import urllib.error
 import urllib.request
@@ -84,3 +85,68 @@ def test_ready_hides_secrets_and_does_not_create_database(tmp_path, monkeypatch)
         httpd.shutdown()
         httpd.server_close()
     assert not database.exists()
+
+
+def _start(monkeypatch: pytest.MonkeyPatch):
+    _clear(monkeypatch)
+    settings = load_settings()
+    httpd = make_server(settings, "127.0.0.1", 0)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    return httpd, thread, f"127.0.0.1:{httpd.server_address[1]}"
+
+
+def _read_response(sock: socket.socket) -> tuple[int, dict[str, str], bytes]:
+    sock.settimeout(2)
+    raw = b""
+    while b"\r\n\r\n" not in raw:
+        piece = sock.recv(4096)
+        assert piece
+        raw += piece
+    head, _, rest = raw.partition(b"\r\n\r\n")
+    lines = head.decode().split("\r\n")
+    status = int(lines[0].split()[1])
+    headers = {}
+    for line in lines[1:]:
+        name, value = line.split(":", 1)
+        headers[name.lower()] = value.strip()
+    need = int(headers.get("content-length", "0"))
+    while len(rest) < need:
+        piece = sock.recv(4096)
+        assert piece
+        rest += piece
+    return status, headers, rest[:need]
+
+
+def test_large_post_closes_connection_before_next_healthz(monkeypatch):
+    httpd, _thread, address = _start(monkeypatch)
+    host, port = address.split(":")
+    poison = b"GET /poison HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"
+    body = b"x" * 65_536 + poison
+    pipelined = (
+        b"POST /hooks/ozon HTTP/1.1\r\n"
+        b"Host: 127.0.0.1\r\n"
+        b"Content-Length: " + str(len(body)).encode() + b"\r\n"
+        b"Connection: keep-alive\r\n"
+        b"\r\n"
+        + body
+        + b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"
+    )
+    try:
+        with socket.create_connection((host, int(port)), timeout=2) as sock:
+            sock.sendall(pipelined)
+            status, headers, payload = _read_response(sock)
+            assert status == 405
+            assert headers["connection"] == "close"
+            assert json.loads(payload)["error"]["code"] == "WRITE_DISABLED"
+            sock.settimeout(2)
+            extra = sock.recv(4096)
+            assert extra == b""
+        with socket.create_connection((host, int(port)), timeout=2) as sock:
+            sock.sendall(b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            status, _headers, payload = _read_response(sock)
+            assert status == 200
+            assert json.loads(payload)["status"] == "ok"
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
