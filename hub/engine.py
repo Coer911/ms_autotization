@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from .automations import Automation, Context, Skip
+from .automations import Automation, Context, Skip, call_wants
 from .entities import TYPES, Entity, from_api
 from .events import Event, merge
 from .moysklad import NotFound
@@ -39,6 +39,8 @@ class Engine:
         self.automations = automations
         self.by_name = {a.name: a for a in automations}
         self.worker = worker
+        for automation in automations:
+            automation._storage = ctx.storage
 
     @property
     def lease(self) -> int:
@@ -88,7 +90,7 @@ class Engine:
             if a.scheduled or a.entity != obj.type:
                 continue
             try:
-                wanted = a.wants(obj, event)
+                wanted = await call_wants(a, obj, event)
             except Exception as e:                       # кривой фильтр не валит остальных
                 log.exception("%s.wants упал", a.name)
                 out.append(Outcome(a.name, obj.label, "failed", f"wants: {e}"))

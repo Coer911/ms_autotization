@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from .automations import Automation, ConfigError, build, event_types
+from .automations import Automation, ConfigError, build, call_wants, event_types
 from .entities import TYPES, from_api, resolve_type
 from .events import Event
 from .moysklad import FieldError, MoySklad, MoySkladError
@@ -291,7 +291,7 @@ async def cmd_run(s: Settings, name: str, ref: str, force: bool) -> int:
         print(f"{obj.label} · {obj.state}" + (f" · {obj.agent.name} · {obj.sum_text} ₽"
                                                if hasattr(obj, "agent") else ""))
         event = Event(entity=obj.type, entity_id=obj.id, action="MANUAL", source="cli")
-        if not force and not a.wants(obj, event):
+        if not force and not await call_wants(a, obj, event):
             bad("условия автоматизации не выполнены — --force, чтобы всё равно")
             return 1
         o = await hub.engine.execute(a, obj, event, mode="force" if force else "normal")

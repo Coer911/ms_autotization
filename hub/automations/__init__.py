@@ -12,7 +12,8 @@
         state: "Собран"
 
 Событийная автоматизация отвечает на вопросы:
-    wants(obj, event)  — надо ли что-то делать (дёшево, без запросов в API);
+    wants(obj, event)  — надо ли что-то делать (дёшево, без запросов в API;
+                         может быть корутиной, если читает свой указатель в базе хаба);
     key(obj, event)    — ключ идемпотентности: одинаковый ключ выполняется один раз;
     run(obj, ctx)      — работа; вернуть итог для журнала; Skip — осознанный пропуск,
                          любое другое исключение — повтор по расписанию.
@@ -24,6 +25,7 @@
 from __future__ import annotations
 
 import importlib
+import inspect
 import logging
 import pkgutil
 from dataclasses import dataclass, field
@@ -65,6 +67,14 @@ class Fields(dict):
 
 def render(template: str, values: dict) -> str:
     return template.format_map(Fields(values))
+
+
+async def call_wants(automation: Automation, obj: Entity, event: Event) -> bool:
+    """Вызвать wants. Корутину дожидаемся: это чтение базы хаба, не запрос в МойСклад."""
+    result = automation.wants(obj, event)
+    if inspect.isawaitable(result):
+        result = await result
+    return bool(result)
 
 
 @dataclass
