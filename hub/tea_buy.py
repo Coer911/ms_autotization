@@ -20,15 +20,27 @@ from io import BytesIO
 
 from openpyxl import load_workbook
 
-_CARD = (
-    "техкарт", "купаж", "рецепт", "готовая", "наименование техкарты",
-    "название техкарты", "наименование продукта", "название продукта", "продукт",
-)
-_COMPONENT = ("компонент", "сырье", "ингредиент", "материал", "позиция", "наименование", "название")
-_QTY = ("количество", "кол-во", "колво", "норма", "расход", "масса", "вес", "qty")
+# Короткие основы («вес», «купаж», «сырье») совпадают с началом названий
+# («Весенний», «Купаж жасмин», «Сырьё зелёное»). Для них — только целое слово
+# или слово с пунктуацией («вес, кг»), без продолжения через пробел.
+_EXACT = {
+    "card": ("техкарта", "купаж", "рецепт", "продукт", "готовая"),
+    "qty": ("вес",),
+    "component": ("сырье", "материал"),
+}
+_PHRASE = {
+    "card": ("наименование техкарты", "название техкарты", "наименование продукта",
+             "название продукта", "готовая продукция"),
+    "qty": ("количество", "кол-во", "колво", "норма", "расход", "масса", "qty"),
+    "component": ("наименование сырья", "название сырья", "компонент", "ингредиент",
+                  "позиция", "наименование", "название"),
+    "percent": ("процент", "доля"),
+    "unit": ("ед.", "единица"),
+}
+_UNIT_NAME = {"ед", "ед.", "ед.изм", "ед. изм", "единица", "единица измерения"}
 _UNIT_QTY = {"кг", "г", "гр", "мг", "мл", "л", "шт"}
-_SKIP_NAME = {"итого", "всего", "total"}
-_OUTPUT = ("выход", "партия", "на партию", "объем")
+_TOTAL = {"итого", "всего", "total"}
+_OUTPUT_WORD = {"выход", "партия", "объем"}
 
 
 class OrderNotPlaced(Exception):
@@ -70,23 +82,43 @@ def parse_qty(value: object) -> float | None:
         return None
 
 
+def _lead(title: str, key: str) -> bool:
+    """Метка колонки: целиком или с хвостом после пробела/знака («норма расхода»)."""
+    if title == key:
+        return True
+    return len(title) > len(key) and title.startswith(key) and title[len(key)] in " ,.:;()"
+
+
+def _exact(title: str, key: str) -> bool:
+    """Целиком или со знаком («вес, кг»), но не как начало другого слова и не «купаж …»."""
+    if title == key:
+        return True
+    return len(title) > len(key) and title.startswith(key) and title[len(key)] in ",.:;()"
+
+
 def _role(title: str) -> str | None:
     if not title:
         return None
-    if title in {"%", "процент"} or title.startswith(("процент", "доля")):
+    if title in {"%", "процент"} or any(_lead(title, key) for key in _PHRASE["percent"]):
         return "percent"
-    if any(title.startswith(name) for name in _CARD):
+    if any(_lead(title, key) for key in _PHRASE["card"]) or any(_exact(title, key) for key in _EXACT["card"]):
         return "card"
-    if any(title.startswith(name) for name in _QTY) or title in _UNIT_QTY:
+    if (any(_lead(title, key) for key in _PHRASE["qty"]) or any(_exact(title, key) for key in _EXACT["qty"])
+            or title in _UNIT_QTY):
         return "qty"
-    if title in {"ед", "ед."} or title.startswith(("ед.", "единиц")):
+    if title in _UNIT_NAME or any(_lead(title, key) for key in _PHRASE["unit"]):
         return "unit"
-    if any(title.startswith(name) for name in _COMPONENT):
+    if (any(_lead(title, key) for key in _PHRASE["component"])
+            or any(_exact(title, key) for key in _EXACT["component"])):
         return "component"
     return None
 
 
 def _header(row: tuple) -> dict | None:
+    # Число в строке — это уже данные, а не шапка. Иначе «Сырьё | 5 | кг»
+    # выглядит как новая таблица: имя похоже на колонку, «кг» — на количество.
+    if any(parse_qty(cell) is not None and norm(cell) not in _UNIT_QTY for cell in row):
+        return None
     roles: list[tuple[int, str, str]] = []
     for i, cell in enumerate(row):
         title = norm(cell)
@@ -106,12 +138,27 @@ def _header(row: tuple) -> dict | None:
     return None
 
 
+def _is_total(name: object) -> bool:
+    title = norm(name)
+    if not title:
+        return False
+    head = title.split(",", 1)[0].strip()
+    return head.split(" ", 1)[0] in _TOTAL
+
+
+def _is_output_label(label: str) -> bool:
+    head = label.split(",", 1)[0].strip()
+    if head == "на партию" or head.startswith("на партию "):
+        return True
+    return head.split(" ", 1)[0] in _OUTPUT_WORD
+
+
 def _output(row: tuple) -> tuple[float, str] | None:
     texts = [(i, norm(cell)) for i, cell in enumerate(row) if norm(cell)]
     if not texts:
         return None
     index, label = texts[0]
-    if not any(label.startswith(prefix) for prefix in _OUTPUT):
+    if not _is_output_label(label):
         return None
     unit = label.split(",", 1)[1].strip() if "," in label else ""
     if unit not in _UNIT_QTY:
@@ -132,7 +179,7 @@ def _title(row: tuple) -> str | None:
         return None
     text = str(filled[0]).strip()
     title = norm(text)
-    if _role(title) or _output(row) or parse_qty(text) is not None or title in _SKIP_NAME:
+    if _role(title) or _output(row) or parse_qty(text) is not None or _is_total(text):
         return None
     if len(title) < 2:
         return None
@@ -155,7 +202,7 @@ def _take_long(row: tuple, spec: dict, sheet: str, card: str, output: tuple[floa
         card = str(raw_card).strip()
     comp_i = found["component"]
     name = row[comp_i] if comp_i < len(row) else None
-    if not str(name or "").strip() or norm(name) in _SKIP_NAME:
+    if not str(name or "").strip() or _is_total(name) or _is_output_label(norm(name)):
         return card
     unit = ""
     if "unit" in found and found["unit"] < len(row) and row[found["unit"]] is not None:
@@ -210,6 +257,11 @@ def _parse_sheet(ws) -> list[dict]:
                 if not any(str(cell or "").strip() for cell in rows[i]):
                     i += 1
                     break
+                produced = _output(rows[i])
+                if produced:
+                    output = produced
+                    i += 1
+                    continue
                 card = _take_long(rows[i], spec, ws.title, card, output, lines)
                 i += 1
             continue
@@ -219,7 +271,7 @@ def _parse_sheet(ws) -> list[dict]:
             if not str(name or "").strip():
                 i += 1
                 break
-            if norm(name) in _SKIP_NAME:
+            if _is_total(name) or _output(data):
                 i += 1
                 continue
             unit = ""

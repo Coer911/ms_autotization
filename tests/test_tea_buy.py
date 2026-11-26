@@ -114,3 +114,35 @@ def test_cli_lists_positions_without_token(tmp_path, monkeypatch, capsys):
 
     assert cli.main(["tea-buy", str(path), "--place-order"]) == 2
     assert "не создан" in capsys.readouterr().out
+
+
+def test_blend_names_stay_matrix_columns():
+    """«Весенний» не колонка веса, «Купаж …» и «Продукт …» не пропадают из матрицы."""
+    def build(book: Workbook) -> None:
+        ws = book.active
+        ws.title = "Купажи"
+        ws.append(["Компонент", "Ед", "Весенний", "Купаж жасмин", "Продукт дня"])
+        ws.append(["Сенча", "кг", 2, 3, 4])
+        ws.append(["Сырьё зелёное", "кг", 1, None, None])
+
+    rows = {(row.name, row.unit): row for row in positions(_xlsx(build))}
+    assert rows[("Сенча", "кг")].quantity == 9
+    assert rows[("Сырьё зелёное", "кг")].quantity == 1
+    assert set(rows[("Сенча", "кг")].cards) == {
+        "Купажи: Весенний", "Купажи: Купаж жасмин", "Купажи: Продукт дня",
+    }
+
+
+def test_ingredient_names_and_totals_are_not_headers():
+    def build(book: Workbook) -> None:
+        ws = book.active
+        ws.title = "Купаж"
+        ws.append(["Компонент", "Количество", "Ед"])
+        ws.append(["Сырьё зелёное", 2, "кг"])
+        ws.append(["Материал упаковки", 1, "шт"])
+        ws.append(["Сенча", 4, "кг"])
+        ws.append(["Выход, кг", 10, "кг"])
+        ws.append(["Итого, кг", 7, "кг"])
+
+    rows = {(row.name, row.unit): row.quantity for row in positions(_xlsx(build))}
+    assert rows == {("Сырьё зелёное", "кг"): 2, ("Материал упаковки", "шт"): 1, ("Сенча", "кг"): 4}
