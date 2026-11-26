@@ -31,3 +31,4 @@ jobs:
         env:
           HUB_TEST_DATABASE_URL: postgresql://hub:hub@localhost:5432/hub
       - run: docker build -t moysklad-hub .
+      - run: DOCKER_BUILDKIT=1 docker build -t ozon-connect -f ozon_connect/Dockerfile --build-context hub=hub ozon_connect
