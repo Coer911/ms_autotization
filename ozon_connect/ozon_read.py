@@ -89,18 +89,41 @@ def _pages(post, visibility: str) -> list[dict]:
         result = payload.get("result") if isinstance(payload, dict) else None
         if not isinstance(result, dict) or not isinstance(result.get("items"), list):
             raise OzonError("Ozon list: нет result.items", "BAD_RESPONSE")
-        total = result.get("total")
-        if isinstance(total, bool) or not isinstance(total, int):
+        total = _declared_total(result)
+        if total is None:
             raise OzonError("Ozon list: нет total", "BAD_RESPONSE")
         page = result["items"]
+        # Пустая страница при ещё не набранном total — не конец каталога.
+        if not page:
+            if len(items) < total:
+                raise OzonError("Ozon list: пустая страница при остатке", "PAGE")
+            return items
         items.extend(page)
-        if not page or len(items) >= total:
+        # total=0 при непустой странице не доказывает, что каталог кончился.
+        if total > 0 and len(items) >= total:
             return items
         new_last = result.get("last_id") or ""
         if not isinstance(new_last, str) or not new_last or new_last == last_id or new_last in seen:
             raise OzonError("Ozon list: страница оборвалась", "PAGE")
         seen.add(new_last)
         last_id = new_last
+
+
+def _declared_total(result: dict) -> int | None:
+    """total, а если его нет или он обнулён — total_items. Иначе выгрузка неполная."""
+    total = result.get("total")
+    other = result.get("total_items")
+    if _is_count(total) and total > 0:
+        return total
+    if _is_count(other):
+        return other
+    if _is_count(total):
+        return total
+    return None
+
+
+def _is_count(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _info(post, offer_ids: list[str]) -> dict[str, dict]:
@@ -125,6 +148,9 @@ def _info(post, offer_ids: list[str]) -> dict[str, dict]:
                 found[offer_id] = {**found[offer_id], "_disagree": True}
             else:
                 found[offer_id] = row
+    missing = [offer_id for offer_id in unique if offer_id not in found]
+    if missing:
+        raise OzonError("Ozon info: не все offer_id вернулись", "PAGE")
     return found
 
 

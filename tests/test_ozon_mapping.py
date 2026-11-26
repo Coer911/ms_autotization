@@ -372,6 +372,146 @@ def test_ozon_last_page_error_does_not_return_partial_catalog():
     assert caught.value.code == "PAGE"
 
 
+def _archived_empty():
+    return {"result": {"items": [], "total": 0, "last_id": ""}}
+
+
+def test_list_reads_total_items_when_total_is_absent():
+    def post(path, body):
+        if path == "/v3/product/list":
+            if body["filter"]["visibility"] == "ARCHIVED":
+                return {"result": {"items": [], "total_items": 0, "last_id": ""}}
+            if body["last_id"] == "":
+                return {"result": {
+                    "items": [{"product_id": 1, "offer_id": "A", "archived": False}],
+                    "total_items": 2,
+                    "last_id": "p2",
+                }}
+            return {"result": {
+                "items": [{"product_id": 2, "offer_id": "B", "archived": False}],
+                "total_items": 2,
+                "last_id": "p2",
+            }}
+        return {"items": [
+            {"id": 1, "offer_id": "A", "sources": [{"sku": "1", "source": "s", "shipment_type": "EXPRESS"}]},
+            {"id": 2, "offer_id": "B", "sources": [{"sku": "2", "source": "s", "shipment_type": "EXPRESS"}]},
+        ]}
+
+    cards, _audits = fetch_ozon(post)
+    assert [card.offer_id for card in cards] == ["A", "B"]
+
+
+def test_missing_total_is_not_a_complete_catalog():
+    def post(path, body):
+        if path != "/v3/product/list":
+            raise AssertionError("info не запрашивается без полного списка")
+        return {"result": {
+            "items": [{"product_id": 1, "offer_id": "A", "archived": False}],
+            "last_id": "p2",
+        }}
+
+    with pytest.raises(OzonError) as caught:
+        fetch_ozon(post)
+    assert caught.value.code == "BAD_RESPONSE"
+
+
+def test_zero_total_does_not_finish_on_the_first_page():
+    seen = []
+
+    def post(path, body):
+        if path != "/v3/product/list":
+            raise AssertionError("ноль в total не закрывает каталог")
+        seen.append(body["last_id"])
+        if body["filter"]["visibility"] == "ARCHIVED":
+            return _archived_empty()
+        if body["last_id"] == "":
+            return {"result": {
+                "items": [{"product_id": 1, "offer_id": "A", "archived": False}],
+                "total": 0,
+                "last_id": "",
+            }}
+        raise AssertionError("второй страницы нет: курсор пуст")
+
+    with pytest.raises(OzonError) as caught:
+        fetch_ozon(post)
+    assert caught.value.code == "PAGE"
+    assert seen == [""]
+
+
+def test_empty_page_with_remainder_does_not_drop_previous_links(tmp_path):
+    ozon = [_ozon("A", "1"), _ozon("B", "2")]
+    cards = [_ms("uuid-a", "A"), _ms("uuid-b", "B")]
+    settings, report, code = _run(tmp_path, ozon, cards)
+    assert code == 0 and report["accounts"][0]["matched"] == 2
+
+    def post(path, body):
+        if path == "/v3/product/info/list":
+            raise AssertionError("карточки не запрашиваются после пустой страницы")
+        if body["filter"]["visibility"] == "ARCHIVED":
+            return _archived_empty()
+        if body["last_id"] == "":
+            return {"result": {
+                "items": [{"product_id": 1, "offer_id": "A", "archived": False}],
+                "total": 2,
+                "last_id": "tail",
+            }}
+        return {"result": {"items": [], "total": 2, "last_id": "tail"}}
+
+    report, code = execute(
+        settings,
+        clock=_clock(),
+        fetch_ms=lambda: (cards, []),
+        fetch_ozon_cards=lambda account: fetch_ozon(post),
+    )
+    assert code == 1
+    assert report["accounts"][0]["fresh"] is False
+    assert report["accounts"][0]["matched"] == 2
+    from ozon_connect.store import Store
+    store = Store(settings.database_path)
+    try:
+        links = store.load_mappings("shop")
+        assert links["A"].status == "matched" and links["A"].ms_id == "uuid-a"
+        assert links["B"].status == "matched" and links["B"].ms_id == "uuid-b"
+    finally:
+        store.close()
+
+
+def test_missing_info_row_does_not_publish_empty_sku(tmp_path):
+    settings, _, code = _run(tmp_path, [_ozon("A", "10", "9")], [_ms("uuid-1", "A")])
+    assert code == 0
+
+    def post(path, body):
+        if path == "/v3/product/list":
+            if body["filter"]["visibility"] == "ARCHIVED":
+                return _archived_empty()
+            return {"result": {
+                "items": [{"product_id": 10, "offer_id": "A", "archived": False}],
+                "total": 1,
+                "last_id": "",
+            }}
+        assert body["offer_id"] == ["A"]
+        return {"items": []}
+
+    report, code = execute(
+        settings,
+        clock=_clock(),
+        fetch_ms=lambda: ([_ms("uuid-1", "A")], []),
+        fetch_ozon_cards=lambda account: fetch_ozon(post),
+    )
+    assert code == 1
+    assert report["accounts"][0]["conflict"] == 0
+    assert report["accounts"][0]["matched"] == 1
+    from ozon_connect.store import Store
+    store = Store(settings.database_path)
+    try:
+        link = store.load_mappings("shop")["A"]
+        assert link.status == "matched"
+        assert link.ms_id == "uuid-1"
+        assert link.ozon_skus == (Sku("9", "supplier_1", "EXPRESS"),)
+    finally:
+        store.close()
+
+
 def test_moysklad_read_is_get_only_and_keeps_services_out():
     seen = []
 
