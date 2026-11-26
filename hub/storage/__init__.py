@@ -198,6 +198,8 @@ class Storage:
 
     @classmethod
     async def open(cls, url: str) -> Storage:
+        if len(OZON_TABLES) != 3:
+            raise RuntimeError("таблицы Ozon не зарегистрированы")
         url = normalize_url(url)
         if url.startswith("sqlite") and ":memory:" not in url:
             from pathlib import Path
@@ -433,3 +435,9 @@ class Storage:
             return True
         await conn.close()
         return False
+
+
+# Таблицы Ozon регистрируются на том же metadata до create_all.
+from . import ozon as ozon_schema  # noqa: E402,F401
+
+OZON_TABLES = (ozon_schema.ozon_postings, ozon_schema.ozon_posting_lines, ozon_schema.ozon_operations)

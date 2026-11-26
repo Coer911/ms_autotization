@@ -106,6 +106,14 @@ automations:
     types: [customerorder, demand]
     telegram_chats: ["-1001234567890"]
 
+  # Чтение отправлений Ozon FBS в базу хаба. Заказы и отгрузки МойСклад не создаёт.
+  # Ключи — OZON_CLIENT_ID и OZON_API_KEY. Пока выключено. docs/ozon/MASTER.md
+  ozon_fbs_import:
+    enabled: false
+    every_minutes: 15
+    lookback_days: 7
+    scheme: fbs
+
 # Telegram-бот и POST /api/ask: вопросы по МойСклад обычным языком, только чтение.
 # Включается переменными ANTHROPIC_API_KEY, TELEGRAM_BOT_TOKEN, HUB_BOT_CHATS (.env.example).
 bot:
