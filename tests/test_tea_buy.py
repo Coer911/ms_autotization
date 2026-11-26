@@ -116,6 +116,20 @@ def test_cli_lists_positions_without_token(tmp_path, monkeypatch, capsys):
     assert "не создан" in capsys.readouterr().out
 
 
+def test_inflected_headers_are_columns():
+    def build(book: Workbook) -> None:
+        ws = book.active
+        ws.title = "Купажирование"
+        ws.append(["Техкарты", "Компоненты", "Вес (кг)", "ед.изм."])
+        ws.append(["Жасминовый", "Сенча", 2, "кг"])
+        aroma = book.create_sheet("Ароматизация")
+        aroma.append(["Ингредиенты", "Единицы измерения", "Количество"])
+        aroma.append(["Бергамот", "г", 5])
+
+    rows = {(row.name, row.unit): row.quantity for row in positions(_xlsx(build))}
+    assert rows == {("Сенча", "кг"): 2, ("Бергамот", "г"): 5}
+
+
 def test_blend_names_stay_matrix_columns():
     """«Весенний» не колонка веса, «Купаж …» и «Продукт …» не пропадают из матрицы."""
     def build(book: Workbook) -> None:

@@ -20,24 +20,14 @@ from io import BytesIO
 
 from openpyxl import load_workbook
 
-# Короткие основы («вес», «купаж», «сырье») совпадают с началом названий
-# («Весенний», «Купаж жасмин», «Сырьё зелёное»). Для них — только целое слово
-# или слово с пунктуацией («вес, кг»), без продолжения через пробел.
-_EXACT = {
-    "card": ("техкарта", "купаж", "рецепт", "продукт", "готовая"),
-    "qty": ("вес",),
-    "component": ("сырье", "материал"),
-}
-_PHRASE = {
-    "card": ("наименование техкарты", "название техкарты", "наименование продукта",
-             "название продукта", "готовая продукция"),
-    "qty": ("количество", "кол-во", "колво", "норма", "расход", "масса", "qty"),
-    "component": ("наименование сырья", "название сырья", "компонент", "ингредиент",
-                  "позиция", "наименование", "название"),
-    "percent": ("процент", "доля"),
-    "unit": ("ед.", "единица"),
-}
-_UNIT_NAME = {"ед", "ед.", "ед.изм", "ед. изм", "единица", "единица измерения"}
+# Основа + падеж («компоненты», «техкарты»), но не другое слово («весенний»)
+# и не название техкарты через пробел («купаж жасмин»).
+_ENDINGS = (
+    "иями", "ями", "ами", "иях", "ях", "ах", "иям", "ям", "ам", "ием",
+    "ого", "ему", "ыми", "ими", "ов", "ев", "ей", "ой", "ою", "ею", "ом", "ем",
+    "ая", "яя", "ое", "ее", "ые", "ие", "ия", "ий", "ый", "ую", "юю",
+    "а", "я", "ы", "и", "у", "ю", "е", "о", "",
+)
 _UNIT_QTY = {"кг", "г", "гр", "мг", "мл", "л", "шт"}
 _TOTAL = {"итого", "всего", "total"}
 _OUTPUT_WORD = {"выход", "партия", "объем"}
@@ -89,27 +79,54 @@ def _lead(title: str, key: str) -> bool:
     return len(title) > len(key) and title.startswith(key) and title[len(key)] in " ,.:;()"
 
 
-def _exact(title: str, key: str) -> bool:
-    """Целиком или со знаком («вес, кг»), но не как начало другого слова и не «купаж …»."""
-    if title == key:
+def _form(title: str, stem: str, *, phrase: bool = False) -> bool:
+    """Основа и окончание. phrase — можно пояснение после пробела, но не чужое слово."""
+    if not title.startswith(stem):
+        return False
+    rest = title[len(stem):]
+    for ending in _ENDINGS:
+        if not rest.startswith(ending):
+            continue
+        tail = rest[len(ending):]
+        if tail == "" or tail[0] in ",.:;()":
+            return True
+        if tail[0] == " " and (phrase or tail.lstrip().startswith("(")):
+            return True
+    return False
+
+
+def _unit_header(title: str) -> bool:
+    compact = title.replace(" ", "")
+    if compact in {"ед", "ед."}:
         return True
-    return len(title) > len(key) and title.startswith(key) and title[len(key)] in ",.:;()"
+    if compact.startswith("ед.") and compact[3:].startswith("изм"):
+        return True
+    return _form(title, "единиц", phrase=True)
 
 
 def _role(title: str) -> str | None:
     if not title:
         return None
-    if title in {"%", "процент"} or any(_lead(title, key) for key in _PHRASE["percent"]):
+    if title in {"%", "процент"} or _form(title, "процент", phrase=True) or _lead(title, "доля"):
         return "percent"
-    if any(_lead(title, key) for key in _PHRASE["card"]) or any(_exact(title, key) for key in _EXACT["card"]):
+    if any(_lead(title, key) for key in (
+        "наименование техкарты", "название техкарты", "наименование продукта",
+        "название продукта", "готовая продукция",
+    )) or _form(title, "готов") or any(
+        _form(title, stem) for stem in ("техкарт", "купаж", "рецепт", "продукт")
+    ):
         return "card"
-    if (any(_lead(title, key) for key in _PHRASE["qty"]) or any(_exact(title, key) for key in _EXACT["qty"])
-            or title in _UNIT_QTY):
+    if any(_lead(title, key) for key in (
+        "количество", "кол-во", "колво", "норма", "расход", "масса", "qty",
+    )) or _form(title, "количеств", phrase=True) or _form(title, "вес", phrase=True) or title in _UNIT_QTY:
         return "qty"
-    if title in _UNIT_NAME or any(_lead(title, key) for key in _PHRASE["unit"]):
+    if _unit_header(title):
         return "unit"
-    if (any(_lead(title, key) for key in _PHRASE["component"])
-            or any(_exact(title, key) for key in _EXACT["component"])):
+    if any(_lead(title, key) for key in (
+        "наименование сырья", "название сырья", "наименование", "название",
+    )) or _form(title, "наименован", phrase=True) or _form(title, "назван", phrase=True) or any(
+        _form(title, stem, phrase=True) for stem in ("компонент", "ингредиент", "позиц")
+    ) or any(_form(title, stem) for stem in ("сырье", "материал")):
         return "component"
     return None
 
