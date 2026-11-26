@@ -15,6 +15,9 @@
   ask "<вопрос>"                            — спросить бота из терминала (нужен ANTHROPIC_API_KEY)
   route-sheet [--month 2026-11] [--state …|all] [--out файл.xlsx]
                                             — маршрутный лист за месяц по статусу, только чтение
+  ozon-fbs-import [--days 7]                — прочитать FBS одного кабинета в базу хаба;
+                                            документы МойСклад не создаются
+  sqlite-backup --out файл.sqlite3          — согласованная копия SQLite, без перезаписи
 """
 from __future__ import annotations
 
@@ -88,6 +91,10 @@ async def cmd_check(s: Settings) -> int:
         ok("боевой режим")
     autos = build(s.automations)
     ok("config.yaml: " + (", ".join(a.name for a in autos) or "автоматизаций не включено"))
+    if any(a.kind == "ozon_fbs_import" for a in autos):
+        ok("Ozon FBS: импорт включён и пишет только в базу хаба, документы МойСклад не создаёт")
+    else:
+        ok("Ozon FBS: импорт выключен")
     ok(f"база: {s.database_url.split('://')[0]}, роль {s.role}")
     for name, value, need in (("HUB_API_KEY", s.api_key, "REST API выключен"),
                               ("HUB_WEBHOOK_SECRET", s.webhook_secret, "вебхуки не принимаются"),
@@ -398,6 +405,51 @@ async def cmd_route_sheet(s: Settings, month: str, state: str, out: str,
     return 0
 
 
+def cmd_sqlite_backup(s: Settings, dest: str) -> int:
+    from pathlib import Path
+
+    from .storage.backup import backup_sqlite
+    try:
+        path = backup_sqlite(s.database_url, Path(dest))
+    except ValueError as exc:
+        bad(str(exc))
+        return 1
+    ok(f"копия {path}")
+    return 0
+
+
+async def cmd_ozon_fbs_import(s: Settings, days: int) -> int:
+    """Один проход чтения. Расписание в config.yaml не включается, документы не создаются."""
+    from .ozon.client import OzonClient, OzonError
+    from .ozon.fbs_import import import_fbs
+    from .storage import Storage
+
+    if not s.ozon_client_id or not s.ozon_api_key:
+        bad("нужны OZON_CLIENT_ID и OZON_API_KEY")
+        return 1
+    if days < 1 or days > 365:
+        bad("окно от 1 до 365 суток")
+        return 1
+    warn("документы МойСклад не создаются; фоновый импорт этой командой не включается")
+    storage = await Storage.open(s.database_url)
+    try:
+        if s.ms_token:
+            async with client(s) as ms:
+                async with OzonClient(s.ozon_client_id, s.ozon_api_key) as ozon:
+                    stats = await import_fbs(storage, ozon, ms, lookback_days=days)
+        else:
+            warn("MOYSKLAD_TOKEN не задан — артикулы не сопоставляются")
+            async with OzonClient(s.ozon_client_id, s.ozon_api_key) as ozon:
+                stats = await import_fbs(storage, ozon, None, lookback_days=days)
+    except (OzonError, ValueError) as exc:
+        bad(str(exc))
+        return 1
+    finally:
+        await storage.close()
+    print(stats.text())
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="python -m hub", description="Хаб автоматизаций МойСклад")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -432,6 +484,11 @@ def main(argv: list[str] | None = None) -> int:
     rs.add_argument("--state", default="", help="статус заказа или all; по умолчанию из logistics_sheet")
     rs.add_argument("--out", default="", help="куда сохранить XLSX")
     rs.add_argument("--with-cancelled", action="store_true", help="при --state all не убирать отменённые")
+    oz = sub.add_parser("ozon-fbs-import",
+                        help="прочитать FBS одного кабинета в базу хаба, без документов МойСклад")
+    oz.add_argument("--days", type=int, default=7, help="сколько суток назад читать, 1…365")
+    sub.add_parser("sqlite-backup", help="согласованная копия файла SQLite, файл назначения не перезаписывается"
+                   ).add_argument("--out", required=True)
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -448,6 +505,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "journal":
         return asyncio.run(cmd_journal(s, args.n, args.status))
+    if args.cmd == "sqlite-backup":
+        return cmd_sqlite_backup(s, args.out)
+    if args.cmd == "ozon-fbs-import":
+        return asyncio.run(cmd_ozon_fbs_import(s, args.days))
     if not s.ms_token:
         bad("не задан MOYSKLAD_TOKEN")
         return 1

@@ -55,6 +55,8 @@ class Settings:
     anthropic_ready: bool = False     # задан ли ANTHROPIC_API_KEY (сам ключ читает SDK)
     automations: dict = field(default_factory=dict)
     bot: dict = field(default_factory=dict)       # секция bot: в config.yaml
+    ozon_client_id: str = ""                      # Client-Id кабинета Ozon, не секрет сам по себе
+    ozon_api_key: str = field(default="", repr=False)
 
     @classmethod
     def from_env(cls, env: dict | None = None) -> Settings:
@@ -89,6 +91,8 @@ class Settings:
             bot_model=env.get("HUB_BOT_MODEL", "") or cls.bot_model,
             bot_effort=env.get("HUB_BOT_EFFORT", "") or cls.bot_effort,
             anthropic_ready=bool(env.get("ANTHROPIC_API_KEY")),
+            ozon_client_id=env.get("OZON_CLIENT_ID", "").strip(),
+            ozon_api_key=env.get("OZON_API_KEY", "").strip(),
         )
         if s.role not in ROLES:
             raise ValueError(f"HUB_ROLE={s.role}: можно {', '.join(ROLES)}")
