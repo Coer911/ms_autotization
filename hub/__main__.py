@@ -18,6 +18,8 @@
   tea-buy <файл.xlsx> [--card …] [--batches N]
                                             — позиции и количество к закупке по техкартам чая;
                                               заказ поставщику не создаёт
+  buy-list                                  — таблица закупки: склад сырья и сиропы
+                                              HERBARISTA 700 мл на 15 дней; только чтение
 """
 from __future__ import annotations
 
@@ -390,6 +392,20 @@ def cmd_tea_buy(path: str, card: str, batches: float, place_order: bool) -> int:
     return 0
 
 
+async def cmd_buy_list(s: Settings) -> int:
+    """Две таблицы закупки. МойСклад только читается, заказ и Telegram не трогаются."""
+    from .buy_list import BuyListError, collect, render
+
+    try:
+        async with client(s) as ms:
+            raw, syrup = await collect(ms)
+    except BuyListError as exc:
+        bad(str(exc))
+        return 1
+    print(render(raw, syrup), end="")
+    return 0
+
+
 async def cmd_route_sheet(s: Settings, month: str, state: str, out: str,
                           with_cancelled: bool) -> int:
     from pathlib import Path
@@ -462,6 +478,7 @@ def main(argv: list[str] | None = None) -> int:
     tb.add_argument("--batches", type=float, default=1.0, help="сколько партий каждой техкарты")
     tb.add_argument("--place-order", action="store_true",
                     help="не создаёт заказ: нужно отдельное явное подтверждение")
+    sub.add_parser("buy-list", help="закупка на 15 дней: склад сырья и сиропы HERBARISTA 700 мл")
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -497,6 +514,7 @@ def main(argv: list[str] | None = None) -> int:
         "ask": lambda: cmd_ask(s, args.question),
         "route-sheet": lambda: cmd_route_sheet(s, args.month, args.state, args.out,
                                                args.with_cancelled),
+        "buy-list": lambda: cmd_buy_list(s),
         "set-field": lambda: cmd_set(s, args.kind, args.ref, "field", [args.field, args.value]),
     }
     try:
