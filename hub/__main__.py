@@ -15,6 +15,11 @@
   ask "<вопрос>"                            — спросить бота из терминала (нужен ANTHROPIC_API_KEY)
   route-sheet [--month 2026-11] [--state …|all] [--out файл.xlsx]
                                             — маршрутный лист за месяц по статусу, только чтение
+  tea-buy <файл.xlsx> [--card …] [--batches N]
+                                            — позиции и количество к закупке по техкартам чая;
+                                              заказ поставщику не создаёт
+  buy-list                                  — список закупки текстом: склад сырья и сиропы
+                                              HERBARISTA 700 мл на 15 дней; только чтение
 """
 from __future__ import annotations
 
@@ -366,6 +371,41 @@ def _route_params(s: Settings) -> dict:
     return {}
 
 
+def cmd_tea_buy(path: str, card: str, batches: float, place_order: bool) -> int:
+    """Список сырья из локального XLSX. МойСклад не вызывается, заказ не создаётся."""
+    from pathlib import Path
+
+    from .tea_buy import ORDER_REFUSAL, OrderNotPlaced, report
+
+    if place_order:
+        bad(str(OrderNotPlaced(ORDER_REFUSAL)))
+        return 2
+    file = Path(path)
+    if not file.is_file():
+        bad(f"нет файла {file}")
+        return 1
+    try:
+        print(report(file.read_bytes(), card=card, batches=batches))
+    except (ValueError, OrderNotPlaced) as exc:
+        bad(str(exc))
+        return 1
+    return 0
+
+
+async def cmd_buy_list(s: Settings) -> int:
+    """Два текстовых блока закупки. МойСклад только читается, заказ и Telegram не трогаются."""
+    from .buy_list import BuyListError, collect, render
+
+    try:
+        async with client(s) as ms:
+            raw, syrup = await collect(ms)
+    except BuyListError as exc:
+        bad(str(exc))
+        return 1
+    print(render(raw, syrup), end="")
+    return 0
+
+
 async def cmd_route_sheet(s: Settings, month: str, state: str, out: str,
                           with_cancelled: bool) -> int:
     from pathlib import Path
@@ -432,6 +472,13 @@ def main(argv: list[str] | None = None) -> int:
     rs.add_argument("--state", default="", help="статус заказа или all; по умолчанию из logistics_sheet")
     rs.add_argument("--out", default="", help="куда сохранить XLSX")
     rs.add_argument("--with-cancelled", action="store_true", help="при --state all не убирать отменённые")
+    tb = sub.add_parser("tea-buy", help="позиции и количество к закупке по техкартам чая")
+    tb.add_argument("path", help="XLSX техкарт: купажирование и ароматизация")
+    tb.add_argument("--card", default="", help="часть названия техкарты или вкладки; пусто — все")
+    tb.add_argument("--batches", type=float, default=1.0, help="сколько партий каждой техкарты")
+    tb.add_argument("--place-order", action="store_true",
+                    help="не создаёт заказ: нужно отдельное явное подтверждение")
+    sub.add_parser("buy-list", help="закупка на 15 дней: склад сырья и сиропы HERBARISTA 700 мл")
     args = p.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -448,6 +495,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "journal":
         return asyncio.run(cmd_journal(s, args.n, args.status))
+    if args.cmd == "tea-buy":
+        return cmd_tea_buy(args.path, args.card, args.batches, args.place_order)
     if not s.ms_token:
         bad("не задан MOYSKLAD_TOKEN")
         return 1
@@ -465,6 +514,7 @@ def main(argv: list[str] | None = None) -> int:
         "ask": lambda: cmd_ask(s, args.question),
         "route-sheet": lambda: cmd_route_sheet(s, args.month, args.state, args.out,
                                                args.with_cancelled),
+        "buy-list": lambda: cmd_buy_list(s),
         "set-field": lambda: cmd_set(s, args.kind, args.ref, "field", [args.field, args.value]),
     }
     try:
