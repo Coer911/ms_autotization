@@ -18,7 +18,7 @@
   tea-buy <файл.xlsx> [--card …] [--batches N]
                                             — позиции и количество к закупке по техкартам чая;
                                               заказ поставщику не создаёт
-  buy-list                                  — таблица закупки: склад сырья и сиропы
+  buy-list                                  — список закупки текстом: склад сырья и сиропы
                                               HERBARISTA 700 мл на 15 дней; только чтение
 """
 from __future__ import annotations
@@ -393,7 +393,7 @@ def cmd_tea_buy(path: str, card: str, batches: float, place_order: bool) -> int:
 
 
 async def cmd_buy_list(s: Settings) -> int:
-    """Две таблицы закупки. МойСклад только читается, заказ и Telegram не трогаются."""
+    """Два текстовых блока закупки. МойСклад только читается, заказ и Telegram не трогаются."""
     from .buy_list import BuyListError, collect, render
 
     try:

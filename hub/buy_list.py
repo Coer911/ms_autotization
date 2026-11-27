@@ -8,8 +8,8 @@ reports/_report_turnover.md) по складу за 31 день. Докумен�
 в товар и не стыкуется со строкой остатка.
 
 Заказать = max(0, расход_в_день × 15 − остаток). Сиропы HERBARISTA 700 мл округляются
-вверх до целой бутылки. Кордиалы 500 мл не входят. В таблицу попадают только позиции,
-которые надо заказать.
+вверх до целой бутылки. Кордиалы 500 мл не входят. В список попадают только позиции,
+которые надо заказать. Печать — простой текст, по строке на позицию.
 
 quantityMode у отчёта остатков по умолчанию nonEmpty (reports/_report_stock.md):
 нулевое «доступно» не приходит. Тогда распроданный вариант 700 мл пропадает из списка,
@@ -213,33 +213,22 @@ def _fmt(value: float, unit: str, *, whole: bool = False) -> str:
     return f"{text} {unit}".strip() if unit else text
 
 
-def _cell(text: str) -> str:
-    return str(text).replace("|", "/")
+def _position(line: Line, *, whole: bool) -> str:
+    return (
+        f"{line.name}. Расход {_fmt(line.monthly, line.unit)}, "
+        f"остаток {_fmt(line.stock, line.unit)}, "
+        f"заказать {_fmt(line.order, line.unit, whole=whole)}"
+    )
 
 
 def render_block(block: Block) -> str:
-    start = block.start.strftime("%d.%m.%Y")
-    end = block.end.strftime("%d.%m.%Y")
-    lines = [
-        f"{block.title} — {block.store}",
-        (f"Окно расхода: {start}–{end} ({WINDOW_DAYS} день). "
-         "Перемещения между складами не входят в расход."),
-        f"Заказать = max(0, расход в день × {COVER_DAYS} − остаток). Покрытие {COVER_DAYS} дней.",
-    ]
+    lines = [f"{block.title} — {block.store}"]
     if block.note:
         lines.append(block.note)
-    lines.append(f"С расходом и запасом на {COVER_DAYS} дней: {block.covered}. "
-                 "В таблице только то, что надо заказать.")
-    lines.append("")
-    lines.append("| Название | Расход за месяц | Остаток | Заказать |")
-    lines.append("| --- | --- | --- | --- |")
     if not block.lines:
-        lines.append("| — | — | — | — |")
-    for line in block.lines:
-        lines.append(
-            f"| {_cell(line.name)} | {_fmt(line.monthly, line.unit)} | "
-            f"{_fmt(line.stock, line.unit)} | {_fmt(line.order, line.unit, whole=block.whole)} |"
-        )
+        lines.append("Заказывать нечего.")
+    else:
+        lines.extend(_position(line, whole=block.whole) for line in block.lines)
     return "\n".join(lines)
 
 

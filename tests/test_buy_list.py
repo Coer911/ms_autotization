@@ -1,4 +1,4 @@
-"""buy-list: две таблицы на 15 дней, без заказа поставщику."""
+"""buy-list: два текстовых блока на 15 дней, без заказа поставщику."""
 from datetime import date
 
 import pytest
@@ -137,12 +137,12 @@ def test_render_puts_raw_store_before_syrups():
     )
     text = render(raw, syrup)
     assert text.index("Склад сырья") < text.index("Сиропы HERBARISTA 700 мл")
-    assert text.count("| Название | Расход за месяц | Остаток | Заказать |") == 2
-    assert "| Валериана | 31 кг | 0 кг | 15 кг |" in text
-    assert "| Сироп Ваниль HERBARISTA, 700 мл | 25,1 шт | 3 шт | 10 шт |" in text
+    assert "|" not in text
+    assert "Валериана. Расход 31 кг, остаток 0 кг, заказать 15 кг" in text
+    assert ("Сироп Ваниль HERBARISTA, 700 мл. Расход 25,1 шт, остаток 3 шт, заказать 10 шт"
+            in text)
     assert "Кордиалы 500 мл не входят" in text
     assert "Заказ поставщику не создаётся" in text
-    assert "28.10.2026–27.11.2026" in text
 
 
 def test_pick_store_requires_one_match():
@@ -236,7 +236,7 @@ async def test_collect_reads_two_stores_and_does_not_write(monkeypatch):
     assert paths.count("report/turnover/all") == 4
 
 
-def test_cli_prints_table_without_calling_moysklad(monkeypatch, capsys):
+def test_cli_prints_lines_without_calling_moysklad(monkeypatch, capsys):
     monkeypatch.setenv("MOYSKLAD_TOKEN", "test-token")
     async def fake_collect(_ms, today=None):
         from hub.buy_list import Block, Line
@@ -252,8 +252,9 @@ def test_cli_prints_table_without_calling_moysklad(monkeypatch, capsys):
     assert cli.main(["buy-list"]) == 0
     out = capsys.readouterr().out
     assert out.index("Склад сырья") < out.index("Сиропы HERBARISTA 700 мл")
-    assert "| Название | Расход за месяц | Остаток | Заказать |" in out
-    assert "Мята" in out
+    assert "|" not in out
+    assert "Мята. Расход 10 кг, остаток 1 кг, заказать 3,839 кг" in out
+    assert "Заказывать нечего." in out
 
 
 class _NoClose:
