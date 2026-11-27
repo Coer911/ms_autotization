@@ -89,6 +89,30 @@ def test_assemble_subtracts_moves_and_sorts_by_cover():
     assert all("Кордиал" not in line.name for line in lines)
 
 
+def test_sold_out_variant_uses_turnover_folder_and_reserved_stock_counts():
+    sold = {
+        "assortment": {
+            **_meta("v/gone", "variant"),
+            "name": "Сироп Манго HERBARISTA, 700 мл",
+            "uom": {"name": "шт"},
+            "productFolder": {"name": "HERBARISTA 700 ML"},
+        },
+        "outcome": {"quantity": 31},
+    }
+    held = _stock("v/held", "Сироп Ваниль HERBARISTA, 700 мл", 10, "шт", "HERBARISTA 700 ML")
+    lines, _covered = assemble(
+        [held], [sold, _turn("v/held", held["name"], 31, "шт")], [], whole=True,
+        allow=lambda href, name, folder: (
+            not is_cordial_500(name) and (href == "v/held" or is_syrup_700(folder, folder))
+        ),
+    )
+    by_name = {line.name: line for line in lines}
+    assert by_name["Сироп Манго HERBARISTA, 700 мл"].stock == 0
+    assert by_name["Сироп Манго HERBARISTA, 700 мл"].order == 15
+    assert by_name[held["name"]].stock == 10
+    assert by_name[held["name"]].order == 5
+
+
 def test_syrup_hrefs_drop_cordial_and_keep_variant_from_stock():
     products = [
         {**_meta("p/vanilla"), "name": "Сироп Ваниль HERBARISTA, 700 мл", "pathName": PATH},
@@ -161,9 +185,15 @@ class _FakeMS:
                 {**_meta("p/cordial"), "name": "Кордиал вишня 500 мл", "pathName": PATH},
             ]
         if path == "report/stock/all" and RAW in filt:
+            assert "quantityMode=all" in filt and "stockMode=all" in filt
             return [_stock("p/mint", "Мята", 1, "кг")]
         if path == "report/stock/all" and FOLDER in filt:
-            return [_stock("p/vanilla", "Сироп Ваниль HERBARISTA, 700 мл", 3, "шт", "HERBARISTA 700 ML")]
+            assert "quantityMode=all" in filt and "stockMode=all" in filt
+            return [
+                _stock("p/vanilla", "Сироп Ваниль HERBARISTA, 700 мл", 3, "шт", "HERBARISTA 700 ML"),
+                _stock("v/gone", "Сироп Манго HERBARISTA, 700 мл", 0, "шт", "HERBARISTA 700 ML"),
+                _stock("v/held", "Сироп Кокос HERBARISTA, 700 мл", 10, "шт", "HERBARISTA 700 ML"),
+            ]
         if path == "report/turnover/all" and "type=move" in filt:
             assert group_by == "variant"
             return []
@@ -175,6 +205,8 @@ class _FakeMS:
             assert group_by == "variant"
             return [
                 _turn("p/vanilla", "Сироп Ваниль HERBARISTA, 700 мл", 31, "шт"),
+                _turn("v/gone", "Сироп Манго HERBARISTA, 700 мл", 31, "шт"),
+                _turn("v/held", "Сироп Кокос HERBARISTA, 700 мл", 31, "шт"),
                 _turn("p/cordial", "Кордиал вишня 500 мл", 31, "шт"),
                 _turn("p/drip", "Дрип", 100, "шт"),
             ]
@@ -193,8 +225,11 @@ async def test_collect_reads_two_stores_and_does_not_write(monkeypatch):
     assert raw.store.startswith("К 49") and "СЫРЬЯ" in raw.store
     assert raw.lines[0].name == "Мята"
     assert raw.lines[0].order == order_qty(62, 1, whole=False)
-    assert [line.name for line in syrup.lines] == ["Сироп Ваниль HERBARISTA, 700 мл"]
-    assert syrup.lines[0].order == 12  # 15 − 3, уже целая бутылка
+    assert [(line.name, line.stock, line.order) for line in syrup.lines] == [
+        ("Сироп Манго HERBARISTA, 700 мл", 0, 15),   # распродан, расход есть
+        ("Сироп Ваниль HERBARISTA, 700 мл", 3, 12),  # 15 − 3
+        ("Сироп Кокос HERBARISTA, 700 мл", 10, 5),   # резерв не обнуляет остаток
+    ]
     assert syrup.whole is True
     paths = [path for path, _params in ms.seen]
     assert "entity/purchaseorder" not in paths

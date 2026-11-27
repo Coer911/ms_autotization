@@ -10,6 +10,12 @@ reports/_report_turnover.md) по складу за 31 день. Докумен�
 Заказать = max(0, расход_в_день × 15 − остаток). Сиропы HERBARISTA 700 мл округляются
 вверх до целой бутылки. Кордиалы 500 мл не входят. В таблицу попадают только позиции,
 которые надо заказать.
+
+quantityMode у отчёта остатков по умолчанию nonEmpty (reports/_report_stock.md):
+нулевое «доступно» не приходит. Тогда распроданный вариант 700 мл пропадает из списка,
+а полностью зарезервированный считается как остаток 0 и завышает заказ. Поэтому оба
+запроса остатков идут с quantityMode=all, а строка оборотов ещё сверяется с группой
+productFolder, если остатка по этому href нет.
 """
 from __future__ import annotations
 
@@ -89,6 +95,14 @@ def order_qty(monthly: float, stock: float, *, whole: bool) -> float:
     return rounded if rounded > 0 else 0.0
 
 
+def _group_name(obj: dict) -> str:
+    """Имя группы: в остатках это folder, в оборотах — productFolder, иначе pathName."""
+    folder = obj.get("folder") or obj.get("productFolder") or {}
+    if isinstance(folder, dict) and folder.get("name"):
+        return str(folder["name"])
+    return str(obj.get("pathName") or "")
+
+
 def _href(row: dict) -> str:
     meta = row.get("meta") or {}
     return str(meta.get("href") or "").split("?")[0]
@@ -129,7 +143,8 @@ def assemble(stock_rows: list[dict], turnover_rows: list[dict], move_rows: list[
     for row in turnover_rows:
         assortment = row.get("assortment") or {}
         href = _href(assortment)
-        if not href or not allow(href, assortment.get("name") or "", ""):
+        folder = _group_name(assortment)
+        if not href or not allow(href, assortment.get("name") or "", folder):
             continue
         monthly[href] += _outcome(row)
         unit = ((assortment.get("uom") or {}).get("name")) or ""
@@ -275,12 +290,13 @@ async def collect(ms, today: date | None = None) -> tuple[Block, Block]:
     folder_href = folder["meta"]["href"]
     products, raw_stock, raw_turn, raw_move, fg_stock, fg_turn, fg_move = await asyncio.gather(
         _rows(ms, "entity/product", filter=f"pathName~{SYRUP_FOLDER}"),
-        _rows(ms, "report/stock/all", filter=f"store={raw_href};stockMode=all"),
+        _rows(ms, "report/stock/all",
+              filter=f"store={raw_href};stockMode=all;quantityMode=all"),
         _rows(ms, "report/turnover/all", filter=f"store={raw_href}", groupBy="variant", **moment),
         _rows(ms, "report/turnover/all", filter=f"store={raw_href};type=move",
               groupBy="variant", **moment),
         _rows(ms, "report/stock/all",
-              filter=f"store={fg_href};stockMode=all;productFolder={folder_href}"),
+              filter=f"store={fg_href};stockMode=all;quantityMode=all;productFolder={folder_href}"),
         _rows(ms, "report/turnover/all", filter=f"store={fg_href}", groupBy="variant", **moment),
         _rows(ms, "report/turnover/all", filter=f"store={fg_href};type=move",
               groupBy="variant", **moment),
@@ -290,8 +306,10 @@ async def collect(ms, today: date | None = None) -> tuple[Block, Block]:
     def raw_allow(_href: str, name: str, _folder: str) -> bool:
         return not is_cordial_500(name)
 
-    def syrup_allow(href: str, name: str, _folder: str) -> bool:
-        return href in hrefs and not is_cordial_500(name)
+    def syrup_allow(href: str, name: str, folder: str) -> bool:
+        if is_cordial_500(name):
+            return False
+        return href in hrefs or is_syrup_700(folder, folder)
 
     raw_lines, raw_covered = assemble(
         raw_stock, raw_turn, raw_move, whole=False, allow=raw_allow)
